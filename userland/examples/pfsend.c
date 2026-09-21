@@ -1,5 +1,5 @@
 /*
- * (C) 2003-20 - ntop 
+ * (C) 2003-26 - ntop 
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -41,7 +41,10 @@
 #include <pcap.h>
 
 #include "pfring.h"
+
 #include "pfutils.c"
+
+#include "third-party/patricia.c"
 
 struct ip_header {
 #if BYTE_ORDER == LITTLE_ENDIAN
@@ -91,17 +94,27 @@ struct tcp_header {
 } __attribute__((packed));
 
 struct packet *pkt_head = NULL;
-pfring  *pd;
+pfring  *pd, *twin_pd = NULL;
 pfring_stat pfringStats;
-char *device = NULL;
+char *device = NULL, *twin_device = NULL, *cidr = NULL;
 u_int8_t wait_for_packet = 1, do_shutdown = 0;
 u_int32_t pkt_loop = 0, pkt_loop_sent = 0, uniq_pkts_per_sec = 0;
+u_int32_t uniq_k_pkts_per_pkts = 1, uniq_pkts_per_pkts = 0;
 u_int64_t num_pkt_good_sent = 0, last_num_pkt_good_sent = 0;
 u_int64_t num_bytes_good_sent = 0, last_num_bytes_good_sent = 0;
+u_int32_t mtu = 1500;
 struct timeval lastTime, startTime;
 int reforge_ip = 0, on_the_fly_reforging = 0;
 int send_len = 60;
 int daemon_mode = 0;
+patricia_tree_t *patricia_v4 = NULL;
+#if !(defined(__arm__) || defined(__mips__))
+double pps = 0;
+double gbps = 0;
+ticks inter_frame_ticks = 0;
+ticks kbyte_ticks = 0;
+u_int8_t inter_frame_ticks_adjusted = 0;
+#endif
 
 #define DEFAULT_DEVICE     "eth0"
 
@@ -150,6 +163,18 @@ void print_stats() {
 	   (long unsigned int) currentThptBits);
   pfring_set_application_stats(pd, statsBuf);
 
+  /* Adjust rate */
+  if (!inter_frame_ticks_adjusted && last_num_pkt_good_sent /* second iteration */) {
+    if (gbps > 0) {
+      double gbps_delta = gbps - (currentThptBits / 1000000000);
+      kbyte_ticks = kbyte_ticks - (kbyte_ticks * (gbps_delta / gbps));
+    } else if (pps > 0) {
+      double pps_delta = pps - currentThpt;
+      inter_frame_ticks = inter_frame_ticks - (inter_frame_ticks * (pps_delta / pps));
+    }
+    inter_frame_ticks_adjusted = 1;
+  }
+
   memcpy(&lastTime, &now, sizeof(now));
   last_num_pkt_good_sent = num_pkt_good_sent, last_num_bytes_good_sent = num_bytes_good_sent;
 }
@@ -174,7 +199,7 @@ void sigproc(int sig) {
 /* *************************************** */
 
 void printHelp(void) {
-  printf("pfsend - (C) 2011-22 ntop.org\n");
+  printf("pfsend - (C) 2011-26 ntop\n");
   printf("Replay synthetic traffic, or a pcap, or a packet in hex format from standard input.\n\n"); 
   printf("pfsend -i out_dev [-a] [-f <.pcap file>] [-g <core_id>] [-h]\n"
          "       [-l <length>] [-n <num>] "
@@ -190,8 +215,9 @@ void printHelp(void) {
   printf("-f <.pcap file> Send packets as read from a pcap file\n");
   printf("-B <BPF>        Send packets matching the provided BPF filter only\n");
   printf("-g <core_id>    Bind this app to a core\n");
+  printf("-G <cidr>       Use packits belonging to the CIDR to the twin device\n");
   printf("-h              Print this help\n");
-  printf("-i <device>     Device name. Use device\n");
+  printf("-i <device>     Egress device name. Repeat it to specify the twin device (see -G)\n");
   printf("-l <length>     Packet length to send. Ignored with -f\n");
   printf("-n <num>        Num pkts to send (use 0 for infinite)\n");
 #if !(defined(__arm__) || defined(__mips__))
@@ -201,17 +227,21 @@ void printHelp(void) {
   printf("-M <src MAC>    Reforge source MAC (format AA:BB:CC:DD:EE:FF)\n");
   printf("-m <dst MAC>    Reforge destination MAC (format AA:BB:CC:DD:EE:FF)\n");
   printf("-b <num>        Reforge source IP with <num> different IPs (balanced traffic)\n");
+  printf("-c <num>        Reforge destination IP with <num> different IPs (ignore -b)\n");
   printf("-t <num>        Reforge source port with <num> different ports per IP (-b)\n");
   printf("-S <ip>         Use <ip> as base source IP for -b (default: 10.0.0.1)\n");
   printf("-D <ip>         Use <ip> as destination IP (default: 192.168.0.1)\n");
   printf("-V <version>    Generate IP version <version> packets (default: 4, mixed: 0)\n");
   printf("-8 <num>        Send the same packets <num> times before moving to the next\n");
-  printf("-A <num>        Add <num> different packets (e.g. -b) every second\n");
   printf("-O              On the fly reforging instead of preprocessing (-b)\n");
-  printf("-z              Randomize generated IPs sequence\n");
+  printf("-A <num>        Add <num> different packets every second up to -b\n");
+  printf("-U <num>        Add K more different packets (-K) every <num> packets up to -b\n");
+  printf("-K <num>        Add <num> more different packets every -U packets up to -b\n");
+  printf("-z              Randomize generated IPs sequence (requires -b)\n");
   printf("-o <num>        Offset for generated IPs (-b) or packets in pcap (-f)\n");
   printf("-W <ID>[,<ID>]  Forge VLAN packets with the specified VLAN ID (and QinQ ID if specified after comma)\n");
   printf("-L <num>        Forge VLAN packets with <num> different ids\n");
+  printf("-0 <char>       Fill packet payload with the specified character (default: 0)\n");
   printf("-F              Force flush for each packet (to avoid bursts, expect low performance)\n");
   printf("-w <watermark>  TX watermark (low value=low latency) [not effective on ZC]\n");
   printf("-d              Daemon mode\n");
@@ -242,8 +272,17 @@ static int reforge_packet(u_char *buffer, u_int buffer_len, u_int idx, u_int use
     }
 
     ip_header = (struct ip_header *) &buffer[hdr.extended_hdr.parsed_pkt.offset.l3_offset];
-    ip_header->daddr = dstaddr.s_addr;
-    ip_header->saddr = htonl((ntohl(srcaddr.s_addr) + ip_offset + (idx % num_ips)) & 0xFFFFFFFF);
+
+    if (balance_source_ips)
+      ip_header->daddr = dstaddr.s_addr;
+    else
+      ip_header->daddr = htonl((ntohl(dstaddr.s_addr) + ip_offset + (idx % num_ips)) & 0xFFFFFFFF);
+
+    if (balance_source_ips)
+      ip_header->saddr = htonl((ntohl(srcaddr.s_addr) + ip_offset + (idx % num_ips)) & 0xFFFFFFFF);
+    else
+      ip_header->saddr = srcaddr.s_addr;
+
     ip_header->check = 0;
     ip_header->check = wrapsum(in_cksum((unsigned char *) ip_header, sizeof(struct ip_header), 0));
 
@@ -274,11 +313,11 @@ static int reforge_packet(u_char *buffer, u_int buffer_len, u_int idx, u_int use
 /* *************************************** */
 
 static void randomize_packets() {
-  struct packet *tobemoved, *add_before, *prev, *tmp;
+  struct packet *tobemoved, *add_before, *prev, *tmp, *last;
   int j, n, moved_pkts = 0;
  
   // keep the first item in pkt_head and detach the second
-  tobemoved = pkt_head->next;
+  last = tobemoved = pkt_head->next;
   pkt_head->next = NULL;
   moved_pkts++;
 
@@ -301,8 +340,103 @@ static void randomize_packets() {
     tobemoved->next = add_before;
     moved_pkts++;
 
+    last = tobemoved;
     tobemoved = tmp;
   }
+
+  last->next = pkt_head;
+}
+
+/* *************************************** */
+
+pfring* open_device(char *name, u_int32_t flags, int watermark) {
+  pfring *pfd = pfring_open(name, mtu, flags);
+  
+  if(pfd == NULL) {
+    printf("pfring_open error [%s] (pf_ring not loaded or interface %s is down ?)\n", 
+           strerror(errno), name);
+    return(NULL);
+  } else {
+    u_int32_t version;
+
+    pfring_set_application_name(pfd, "pfsend");
+    pfring_version(pfd, &version);
+
+    printf("Using PF_RING v.%d.%d.%d on %s\n", (version & 0xFFFF0000) >> 16,
+	   (version & 0x0000FF00) >> 8, version & 0x000000FF,
+	   name);
+  }
+
+  if(watermark > 0) {
+    int rc;
+
+    if((rc = pfring_set_tx_watermark(pfd, watermark)) < 0) {
+      if (rc == PF_RING_ERROR_NOT_SUPPORTED)
+        printf("pfring_set_tx_watermark() now supported on %s\n", name);
+      else
+        printf("pfring_set_tx_watermark() failed [rc=%d]\n", rc);
+    }
+  }
+
+  return(pfd);
+}
+
+/* ****************************************************** */
+
+int fill_prefix_v4(prefix_t *p, const struct in_addr *a, int b, int mb) {
+  memset(p, 0, sizeof(prefix_t));
+
+  if(b < 0 || b > mb)
+    return(-1);
+
+  p->add.sin.s_addr = a->s_addr, p->family = AF_INET, p->bitlen = b, p->ref_count = 0;
+
+  return(0);
+}
+
+/* *************************************** */
+
+u_int8_t compute_packet_index(u_char *pkt, u_int pkt_len) {
+  struct pfring_pkthdr hdr;
+  int rc;
+
+  memset(&hdr, 0, sizeof(hdr));
+  hdr.len = hdr.caplen = pkt_len;
+
+  rc = pfring_parse_pkt(pkt, &hdr, 3, 0, 0);
+
+  if (rc < 3) {
+    //fprintf(stderr, "Parse error (%d)\n", rc);
+    return(0); 
+  }
+
+  if(hdr.extended_hdr.parsed_pkt.ip_version == 4) {
+    prefix_t prefix;
+    struct in_addr addr;
+    patricia_node_t *node;
+
+    /* Match source IP */
+    addr.s_addr = htonl(hdr.extended_hdr.parsed_pkt.ipv4_src);
+    fill_prefix_v4(&prefix, &addr, 32, 32);
+    node = patricia_search_best(patricia_v4, &prefix);
+    if(node) return(1);
+
+#if 0
+    /* Match destination IP */
+    addr.s_addr = htonl(hdr.extended_hdr.parsed_pkt.ipv4_dst);
+    fill_prefix_v4(&prefix, &addr, 32, 32);
+    node = patricia_search_best(patricia_v4, &prefix);
+    if(node) return(1);
+#endif
+  } else {
+#if 0
+    /* TODO IPv6 support */
+    hdr.extended_hdr.parsed_pkt.ipv6_src;
+    hdr.extended_hdr.parsed_pkt.ipv6_dst;
+#endif
+  }
+  
+  return(0);
 }
 
 /* *************************************** */
@@ -315,12 +449,12 @@ int main(int argc, char* argv[]) {
   u_int32_t num_to_send = 0;
   int bind_core = -1;
   u_int16_t cpu_percentage = 0;
-  double pps = 0;
 #if !(defined(__arm__) || defined(__mips__))
-  double gbit_s = 0, td;
-  ticks tick_start = 0, tick_delta = 0, tick_prev = 0;
+  ticks tick_start = 0, tick_prev = 0, tick_delta = 0;
 #endif
-  u_int32_t uniq_pkts_limit = 0;
+  u_int64_t curr_uniq_pkts_limit = 0;
+  u_int64_t on_the_fly_sent = 0;
+  u_int64_t uniq_pkts_per_pkts_cnt = 0;
   ticks hz = 0;
   struct packet *tosend;
   int num_uniq_pkts = 1, watermark = 0;
@@ -331,7 +465,6 @@ int main(int argc, char* argv[]) {
   int randomize = 0;
   int reforging_idx;
   int stdin_packet_len = 0;
-  int num_ports = 1;
   u_int ip_v = 4;
   int flush = 0;
   char *bpfFilter = NULL;
@@ -343,11 +476,19 @@ int main(int argc, char* argv[]) {
   srcaddr.s_addr = 0x0100000A /* 10.0.0.1 */;
   dstaddr.s_addr = 0x0100A8C0 /* 192.168.0.1 */;
 
-  while((c = getopt(argc, argv, "A:b:B:dD:hi:n:g:l:L:o:Oaf:Fr:vm:M:p:P:S:t:V:w:W:z8:")) != -1) {
+  dstmac[0] = 0x0, dstmac[1] = 0x1, dstmac[2] = 0x2;
+  dstmac[3] = 0x3, dstmac[4] = 0x4, dstmac[5] = 0x5;
+  srcmac[0] = 0x0, srcmac[1] = 0x1, srcmac[2] = 0x2;
+  srcmac[3] = 0x4, srcmac[4] = 0x5, srcmac[5] = 0x6;
+
+  while((c = getopt(argc, argv, "A:b:B:c:dD:hi:n:g:G:l:L:o:Oaf:Fr:vm:M:p:P:S:t:K:U:V:w:W:z8:0:")) != -1) {
     switch(c) {
     case 'A':
       uniq_pkts_per_sec = atoi(optarg);
       break;
+    case 'c':
+      balance_source_ips = 0;
+      /* fall through */
     case 'b':
       num_ips = atoi(optarg);
       if(num_ips == 0) num_ips = 1;
@@ -362,11 +503,17 @@ int main(int argc, char* argv[]) {
       inet_aton(optarg, &dstaddr);
       reforge_ip = 1;
       break;
+    case 'G':
+      cidr = strdup(optarg);
+      break;
     case 'h':
       printHelp();
       break;
     case 'i':
-      device = strdup(optarg);
+      if(device == NULL)
+	device = strdup(optarg);
+      else
+	twin_device = strdup(optarg);
       break;
     case 'f':
       pcap_in = strdup(optarg);
@@ -390,6 +537,7 @@ int main(int argc, char* argv[]) {
     case 'l':
       send_len = atoi(optarg);
       if (send_len > MAX_PACKET_SIZE) send_len = MAX_PACKET_SIZE;
+      if (send_len > mtu) mtu = send_len;
       break;
     case 'L':
       forge_vlan = 1;
@@ -405,7 +553,7 @@ int main(int argc, char* argv[]) {
       break;
 #if !(defined(__arm__) || defined(__mips__))
     case 'r':
-      sscanf(optarg, "%lf", &gbit_s);
+      sscanf(optarg, "%lf", &gbps);
       break;
     case 'p':
       sscanf(optarg, "%lf", &pps);
@@ -441,6 +589,12 @@ int main(int argc, char* argv[]) {
     case 'P':
       pidFileName = strdup(optarg);
       break;
+    case 'K':
+      uniq_k_pkts_per_pkts = atoi(optarg);
+      break;
+    case 'U':
+      uniq_pkts_per_pkts = atoi(optarg);
+      break;
     case 'V':
       ip_v = atoi(optarg);
       break;
@@ -472,6 +626,9 @@ int main(int argc, char* argv[]) {
     case '8':
       pkt_loop = atoi(optarg);
       break;
+    case '0':
+      packet_content = optarg[0];
+      break;
     default:
       printHelp();
     }
@@ -482,6 +639,41 @@ int main(int argc, char* argv[]) {
       || optind < argc /* Extra argument */)
     printHelp();
 
+  if((cidr && (twin_device == NULL))
+     || ((cidr == NULL) && (twin_device != NULL))) {
+    printf("Warning: ignored -G/-i as both of them need to be specified simultaneously\n");
+    cidr = NULL, twin_device = NULL;
+  }
+
+  if(cidr != NULL) {
+    /* 192.168.0.0/16,10.0.0.0/8 */
+    char *item, *tmp;
+
+    patricia_v4 = patricia_new(32 /* IPv4 */);
+    
+    item = strtok_r(cidr, ",", &tmp);
+
+    while(item != NULL) {
+      prefix_t prefix;
+      char *tmp1, *net = strtok_r(item, "/", &tmp1);
+      int slash = 32;
+      in_addr_t a;
+      
+      if(net) {
+	char *s = strtok_r(NULL, "/", &tmp1);
+
+	if(s != NULL)
+	  slash = atoi(s);
+      }
+
+      a = inet_addr(net);
+      fill_prefix_v4(&prefix, (const struct in_addr *)&a, slash, 32);
+      patricia_lookup(patricia_v4, &prefix);
+
+      item = strtok_r(NULL, ",", &tmp);
+    }
+  }
+  
   if (num_uniq_pkts > 1000000 && !on_the_fly_reforging)
     printf("Warning: please use -O to reduce memory preallocation when many IPs are configured with -b\n");
 
@@ -498,32 +690,14 @@ int main(int argc, char* argv[]) {
   if(bpfFilter != NULL)
     flags |= PF_RING_TX_BPF;
 
-  pd = pfring_open(device, 1500, flags);
-  if(pd == NULL) {
-    printf("pfring_open error [%s] (pf_ring not loaded or interface %s is down ?)\n", 
-           strerror(errno), device);
+  if((pd = open_device(device, flags, watermark)) == NULL)
     return(-1);
-  } else {
-    u_int32_t version;
 
-    pfring_set_application_name(pd, "pfsend");
-    pfring_version(pd, &version);
-
-    printf("Using PF_RING v.%d.%d.%d\n", (version & 0xFFFF0000) >> 16,
-	   (version & 0x0000FF00) >> 8, version & 0x000000FF);
+  if(twin_device) {
+    if((twin_pd = open_device(twin_device, flags, watermark)) == NULL)
+      return(-1);
   }
-
-  if(watermark > 0) {
-    int rc;
-
-    if((rc = pfring_set_tx_watermark(pd, watermark)) < 0) {
-      if (rc == PF_RING_ERROR_NOT_SUPPORTED)
-        printf("pfring_set_tx_watermark() now supported on %s\n", device);
-      else
-        printf("pfring_set_tx_watermark() failed [rc=%d]\n", rc);
-    }
-  }
-
+  
   signal(SIGINT, sigproc);
   signal(SIGTERM, sigproc);
   signal(SIGINT, sigproc);
@@ -535,7 +709,7 @@ int main(int argc, char* argv[]) {
     send_len = 62; /* min len with IPv6 */
 
 #if !(defined(__arm__) || defined(__mips__))
-  if(gbit_s != 0 || pps != 0 || uniq_pkts_per_sec) {
+  if(gbps != 0 || pps != 0 || uniq_pkts_per_sec) {
     /* computing usleep delay */
     tick_start = getticks();
     usleep(1);
@@ -589,12 +763,23 @@ int main(int argc, char* argv[]) {
 	if(p) {
           int plen, oplen;
 
-          plen = oplen = h->caplen;
+          plen = h->caplen;
           if (datalink == DLT_LINUX_SLL)
-            plen -= 2, oplen -= 2;
+            plen -= 2;
+          else if (datalink == DLT_RAW)
+            plen += 14;
+
+          oplen = plen;
+
           if (plen < 60)
             plen = 60;
+
           p->len = plen;
+
+	  if(cidr != NULL)
+	    p->iface_index = compute_packet_index(pkt, plen);
+	  else
+	    p->iface_index = 0;
 
           p->id = num_pcap_pkts;
 	  p->ticks_from_beginning = (((h->ts.tv_sec - beginning.tv_sec) * 1000000) + (h->ts.tv_usec - beginning.tv_usec)) * hz / 1000000;
@@ -608,6 +793,12 @@ int main(int argc, char* argv[]) {
             if (datalink == DLT_LINUX_SLL) {
 	      memcpy(p->pkt, pkt, 12);
               memcpy(&p->pkt[12], &pkt[14], oplen - 14);
+            } else if (datalink == DLT_RAW) {
+              struct ether_header *eth_hdr = (struct ether_header *) p->pkt;
+              memcpy(eth_hdr->ether_dhost, dstmac, 6);
+              memcpy(eth_hdr->ether_shost, srcmac, 6);
+              eth_hdr->ether_type = htons(0x0800) /* IPv4 */;
+              memcpy(&p->pkt[14], pkt, oplen - 14);
 	    } else {
 	      memcpy(p->pkt, pkt, oplen);
             }
@@ -643,6 +834,7 @@ int main(int argc, char* argv[]) {
       if (num_pcap_pkts == 0) {
         printf("Pcap file %s is empty\n", pcap_in);
         pfring_close(pd);
+	if(twin_pd) pfring_close(twin_pd);
         return(-1);
       }
 
@@ -660,6 +852,7 @@ int main(int argc, char* argv[]) {
     } else {
       printf("Unable to open file %s\n", pcap_in);
       pfring_close(pd);
+      if(twin_pd) pfring_close(twin_pd);
       return(-1);
     }
   } else {
@@ -701,6 +894,11 @@ int main(int argc, char* argv[]) {
 
       memcpy(p->pkt, buffer, send_len);
 
+      if(cidr != NULL)
+	p->iface_index = compute_packet_index(buffer, send_len);
+      else
+	p->iface_index = 0;
+      
       if (last != NULL) last->next = p;
       last = p;
 
@@ -721,22 +919,21 @@ int main(int argc, char* argv[]) {
   }
 
 #if !(defined(__arm__) || defined(__mips__))
-  if(gbit_s > 0) {
-    /* computing max rate */
-    pps = ((gbit_s * 1000000000) / 8 /*byte*/) / (8 /*Preamble*/ + send_len + 4 /*CRC*/ + 12 /*IFG*/);
-  } else if (gbit_s < 0) {
-    /* capture rate */
-    pps = -1;
-  } /* else use pps */
+  if (gbps < 0)
+    pps = -1; /* real pcap rate */
 
-  if (pps > 0 || uniq_pkts_per_sec) {
-    td = (double) (hz / pps);
-    tick_delta = (ticks)td;
+  if (gbps > 0) {
+    double kbyte_sec = (gbps * 1000000) /* kbps*/ / 8;
+    double td = (double) (hz / kbyte_sec);
+    kbyte_ticks = (ticks) td;
 
-    if (gbit_s > 0)
-      printf("Rate set to %.2f Gbit/s, %d-byte packets, %.2f pps\n", gbit_s, (send_len + 4 /*CRC*/), pps);
-    else
-      printf("Rate set to %.2f pps\n", pps);
+    printf("Rate set to %.2f Gbit/s, %.2f kB/s\n", gbps, kbyte_sec);
+
+  } else if (pps > 0 || uniq_pkts_per_sec) {
+    double td = (double) (hz / pps);
+    inter_frame_ticks = (ticks)td;
+
+    printf("Rate set to %.2f pps\n", pps);
   }
 #endif
 
@@ -756,37 +953,56 @@ int main(int argc, char* argv[]) {
   if(pfring_enable_ring(pd) != 0) {
     printf("Unable to enable ring :-(\n");
     pfring_close(pd);
+    if(twin_pd) pfring_close(twin_pd);
     return(-1);
+  } else if(twin_pd) {
+    pfring_enable_ring(twin_pd);
   }
-
+  
   if(bpfFilter != NULL) {
     rc = pfring_set_bpf_filter(pd, bpfFilter);
     if(rc != 0)
       fprintf(stderr, "pfring_set_bpf_filter(%s) returned %d\n", bpfFilter, rc);
+    else if(twin_pd) {
+      rc = pfring_set_bpf_filter(twin_pd, bpfFilter);
+
+      if(rc != 0)
+	fprintf(stderr, "pfring_set_bpf_filter(%s) returned %d\n", bpfFilter, rc);
+    }      
   }
 
   tosend = pkt_head;
   i = 0;
   reforging_idx = 0;
 
-  if (uniq_pkts_per_sec) /* init limit */
-    uniq_pkts_limit = uniq_pkts_per_sec;
+  if (uniq_pkts_per_sec) { /* init limit */
+    curr_uniq_pkts_limit = uniq_pkts_per_sec;
+  } else if (uniq_pkts_per_pkts) {
+    curr_uniq_pkts_limit = 1;
+  }
 
   pfring_set_application_stats(pd, "Statistics not yet computed: please try again...");
   if(pfring_get_appl_stats_file_name(pd, path, sizeof(path)) != NULL)
     fprintf(stderr, "Dumping statistics on %s\n", path);
 
 #if !(defined(__arm__) || defined(__mips__))
-  if(pps != 0 || uniq_pkts_per_sec)
+  if(pps != 0 || gbps != 0 || uniq_pkts_per_sec)
     tick_start = tick_prev = getticks();
-#endif
 
   if (pps < 0) /* flush for sending at the exact original pcap speed only, otherwise let pf_ring flush when needed) */
     flush = 1;
+#endif
 
-  if (randomize && !on_the_fly_reforging)
-    randomize_packets();
-
+  if (randomize) {
+    if(reforge_ip == 0) {
+      randomize = 0;
+      fprintf(stderr, "WARNING: -z requires you to use -b: ignored\n");
+    } else {
+      if(!on_the_fly_reforging)
+	randomize_packets();
+    }
+  }
+  
   if(!verbose) {
     signal(SIGALRM, my_sigalarm);
     alarm(1);
@@ -803,12 +1019,12 @@ int main(int argc, char* argv[]) {
 
     if (on_the_fly_reforging) {
       if (stdin_packet_len <= 0)
-        forge_udp_packet(tosend->pkt, tosend->len, reforging_idx + num_pkt_good_sent, (ip_v != 4 && ip_v != 6) ? (i&0x1 ? 6 : 4) : ip_v);
+        forge_udp_packet(tosend->pkt, tosend->len, reforging_idx + on_the_fly_sent, (ip_v != 4 && ip_v != 6) ? (i&0x1 ? 6 : 4) : ip_v);
       else
-        reforge_packet(tosend->pkt, tosend->len, reforging_idx + num_pkt_good_sent, 1); 
+        reforge_packet(tosend->pkt, tosend->len, reforging_idx + on_the_fly_sent, 1); 
     }
 
-    rc = pfring_send(pd, (char *) tosend->pkt, tosend->len, flush);
+    rc = pfring_send((tosend->iface_index == 0) ? pd : twin_pd, (char *) tosend->pkt, tosend->len, flush);
 
     if (unlikely(verbose))
       printf("[%d] pfring_send(%d) returned %d\n", i, tosend->len, rc);
@@ -832,9 +1048,12 @@ int main(int argc, char* argv[]) {
       goto redo;
     }
 
-    if (randomize && on_the_fly_reforging) {
-      n = random() & 0xF;
-      reforging_idx += n;
+    if (on_the_fly_reforging) {
+      on_the_fly_sent++;
+      if (randomize) {
+        n = random() & 0xF;
+        reforging_idx += n;
+      }
     }
 
     if (pkt_loop && ++pkt_loop_sent < pkt_loop) {
@@ -847,10 +1066,20 @@ int main(int argc, char* argv[]) {
     }
 
 #if !(defined(__arm__) || defined(__mips__))
-    if(pps > 0) {
+    if (gbps > 0) {
       int tx_syncronized = 0;
-      /* rate set */
-      while((getticks() - tick_start) < (num_pkt_good_sent * tick_delta)) {
+      /* gbps rate set */
+      while((getticks() - tick_start) < ((num_bytes_good_sent >> 10 /* /1024 */) * kbyte_ticks)) {
+        if (!tx_syncronized) {
+          pfring_flush_tx_packets(pd);
+          tx_syncronized = 1;
+        }
+        if (unlikely(do_shutdown)) break;
+      }
+    } else if(pps > 0) {
+      int tx_syncronized = 0;
+      /* pps or gbps rate set */
+      while((getticks() - tick_start) < (num_pkt_good_sent * inter_frame_ticks)) {
         if (!tx_syncronized) {
           pfring_flush_tx_packets(pd);
           tx_syncronized = 1;
@@ -858,37 +1087,64 @@ int main(int argc, char* argv[]) {
         if (unlikely(do_shutdown)) break;
       }
     } else if (pps < 0) {
+      int tx_syncronized = 0;
       /* real pcap rate */
       if (tosend->ticks_from_beginning == 0)
         tick_start = getticks(); /* first packet, resetting time */
-      while((getticks() - tick_start) < tosend->ticks_from_beginning)
+      while((getticks() - tick_start) < tosend->ticks_from_beginning) {
+        if (!tx_syncronized) {
+          pfring_flush_tx_packets(pd);
+          tx_syncronized = 1;
+        }
         if (unlikely(do_shutdown)) break;
+      }
     }
 
-    /* add N uniq packets per second */
-    if (uniq_pkts_per_sec) {
-      if (uniq_pkts_limit < num_uniq_pkts) {
-        if (getticks() - tick_prev > hz) {
-          /* 1s elapsed, add N uniq packets */
-          uniq_pkts_limit += uniq_pkts_per_sec;
-          tick_prev = getticks();
+    if (uniq_pkts_per_sec || uniq_pkts_per_pkts) {
+
+      if (curr_uniq_pkts_limit < num_uniq_pkts) {
+        if (uniq_pkts_per_sec) {
+          /* add N uniq packets per second */
+          if (getticks() - tick_prev > hz) {
+            /* 1s elapsed, add N uniq packets */
+            curr_uniq_pkts_limit += uniq_pkts_per_sec;
+            tick_prev = getticks();
+          }
+        } else if (uniq_pkts_per_pkts) {
+          /* add K more uniq packet every N packets */
+          uniq_pkts_per_pkts_cnt++;
+          if (uniq_pkts_per_pkts_cnt >= uniq_pkts_per_pkts) {
+            uniq_pkts_per_pkts_cnt = 0;
+            curr_uniq_pkts_limit += uniq_k_pkts_per_pkts;
+          }
         }
       }
+
       /* check the uniq packets limit */
-      if (tosend->id >= uniq_pkts_limit)
+      if (tosend->id >= curr_uniq_pkts_limit)
         tosend = pkt_head;
+
+      if (on_the_fly_reforging) {
+        if (on_the_fly_sent >= curr_uniq_pkts_limit)
+          on_the_fly_sent = 0;
+      }
     }
+
 #endif
 
     if(num_to_send > 0) i++;
   } /* for */
+
+  pfring_flush_tx_packets(pd);
 
   print_stats();
   printf("Sent %llu packets\n", (long long unsigned int) num_pkt_good_sent);
 
  close_socket:
   pfring_close(pd);
-
+  if(twin_pd) pfring_close(twin_pd);
+  if(patricia_v4) patricia_destroy(patricia_v4, NULL);
+  
   if (pidFileName)
     remove_pid_file(pidFileName);
 

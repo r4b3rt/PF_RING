@@ -55,9 +55,9 @@ LIBS       = ${LIBPCAP} ${LIBPFRING} ${LIBPCAP} ${LIBPFRING} `../lib/pfring_conf
 #
 PFPROGS   = pfcount pfcount_multichannel pfsend_multichannel preflect \
 	    pfflow_offload pfbridge alldevs pcap2nspcap \
-	    pfcount_82599 pfsystest pfsend pflatency pftimeline
+	    pfsystest pfsend pflatency pftimeline
 
-PCAPPROGS = pcount pfwrite
+PCAPPROGS = pcount pfwrite psend
 TARGETS   = ${PFPROGS} ${PCAPPROGS}
 
 RCOBJS    = ringc.o interval.o
@@ -91,14 +91,8 @@ pfcount_multichannel: pfcount_multichannel.o ${LIBPFRING}
 pfsend_multichannel: pfsend_multichannel.o ${LIBPFRING}
 	${CC} ${CFLAGS} pfsend_multichannel.o ${LIBS} -o $@
 
-pfcount_82599: pfcount_82599.o ${LIBPFRING}
-	${CC} ${CFLAGS} pfcount_82599.o ${LIBS} -o $@
-
 preflect: preflect.o ${LIBPFRING}
 	${CC} ${CFLAGS} preflect.o ${LIBS} -o $@
-
-pfflow_offload: pfflow_offload.o ${LIBPFRING}
-	${CC} ${CFLAGS} pfflow_offload.o ${LIBS} -o $@
 
 pfsend: pfsend.o ${LIBPFRING}
 	${CC} ${CFLAGS} pfsend.o ${LIBS} -o $@
@@ -115,8 +109,14 @@ ptwin: ptwin.o ${LIBPFRING}
 pfbridge: pfbridge.o ${LIBPFRING}
 	${CC} ${CFLAGS} pfbridge.o ${LIBS} -o $@
 
+pfflow_offload: pfflow_offload.o ${LIBPFRING}
+	${CC} ${CFLAGS} pfflow_offload.o ${LIBS} -o $@
+
 pcount: pcount.o ${LIBPFRING}
 	${CC} ${CFLAGS} pcount.o ${LIBS} -o $@
+
+psend: psend.o ${LIBPFRING}
+	${CC} ${CFLAGS} psend.o ${LIBS} -o $@
 
 alldevs: alldevs.o ${LIBPFRING}
 	${CC} ${CFLAGS} alldevs.o ${LIBS} -o $@
@@ -130,7 +130,7 @@ pfsystest: pfsystest.o ${LIBPFRING}
 pftimeline: pftimeline.o ${LIBPFRING}
 	${CC} ${CFLAGS} pftimeline.o ${LIBS} -o $@
 
-install:
+install: $(TARGETS)
 	mkdir -p $(DESTDIR)/usr/bin
 	cp $(TARGETS) $(DESTDIR)/usr/bin/
 

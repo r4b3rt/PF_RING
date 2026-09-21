@@ -23,13 +23,13 @@ PRE_BUILD_EXAMPLES="pre-build-examples"
 PRE_DEP="pre"
 if test $MACHINE = "x86_64"; then
    EXTN="amd64"
+elif test $MACHINE = "aarch64"; then
+   EXTN="arm64"
+elif test $MACHINE = "i686"; then 
+   EXTN="i386"
 else
-   if test $MACHINE = "i686"; then 
-     EXTN="i386"
-   else
      PRE_DEP=""
      PRE_BUILD_EXAMPLES=""
-   fi
 fi
 
 if [ test -d $HOME/nDPI ]; then
@@ -45,6 +45,12 @@ if test "$UBUNTU_RELEASE" = "20.04"; then
 else
   LIBBPF_DEST=""
   LIBBPF_COPY=""
+fi
+
+if test -f /usr/bin/debsigs; then
+  SIGN_CMD="/usr/bin/debsigs"
+else
+  SIGN_CMD="dpkg-sig"
 fi
 
 dnl> The step below is necessary to make sure the package will work on the
@@ -66,6 +72,7 @@ AC_SUBST(PRE_BUILD_EXAMPLES)
 AC_SUBST(NDPI_DEP)
 AC_SUBST(LIBBPF_DEST)
 AC_SUBST(LIBBPF_COPY)
+AC_SUBST(SIGN_CMD)
 
 AC_CONFIG_FILES(Makefile)
 AC_CONFIG_FILES(debian/changelog)

@@ -21,7 +21,7 @@ replaced by software distribution using ZC.
 
 In order to configure the number of queues, you can use the RSS parameter at 
 insmod time (if you are installing PF_RING ZC drivers from packages you can 
-use the configuration file as explained in README.apt_rpm_packages), passing 
+use the configuration file as explained in the installation instructions), passing 
 a comma-separated list (one per interface) of numbers (number of queues per
 interface). Examples:
 
@@ -67,6 +67,65 @@ below:
 .. code-block:: console
 
    ethtool -X <if> weight 1 0 0 0
+
+When using PF_RING ZC, RSS is reconfigured by the PF_RING ZC driver on most Intel 
+adapter families. However, on some adapters (e.g. *ice* adapters) PF_RING ZC keeps 
+the RSS configuration created by the linux driver and ethtool should be used to 
+tune RSS settings. For example, to set packet hashing based on the 4-tuple on *ice*
+adapters, which is source and destination IP and port (default), it is possible to use:
+
+.. code-block:: console
+
+   ethtool -N enp1s0f1 rx-flow-hash tcp4 sdfn
+   ethtool -N enp1s0f1 rx-flow-hash udp4 sdfn
+
+Or to set packet hashing based on the 2-tuple, which is source and destination IP only
+it is possible to use:
+
+.. code-block:: console
+
+   ethtool -N enp1s0f1 rx-flow-hash tcp4 sd
+   ethtool -N enp1s0f1 rx-flow-hash udp4 sd
+
+Where in 'sdnf' and 'sd':
+
+- s: Source IP address
+- d: Destination IP address
+- f: Source port
+- n: Destination port
+
+RSS with GTP
+~~~~~~~~~~~~
+
+When it comes to process GTP traffic at scale, and we want to leverage on RSS
+to distribute the packet processing load, using a basic RSS configuration
+is often not a viable solution. Let's assume for instance that we want to process
+GTP-C traffic using a dediceted process, and load balance GTP-U traffic to
+multiple processes or threads: this is possible using an advanced RSS configuration
+combined with flow steering. In order to achieve this just follow the steps below:
+
+1. Configure the card with 8 (or any number of) RX queues.
+
+.. code-block:: console
+
+   ethtool --set-channels <if> combined 8
+
+2. Send all GTP-C traffic to the first queue. We use the flow director for this,
+supported on most Intel (e.g. E810) and NVIDIA/Mellanox (ConnectX) adapters.
+
+.. code-block:: console
+
+   ethtool -U <if> flow-type udp4 src-port 2123 action 0
+
+(Note: "action 0" means "steer to queue 0")
+
+2. Distribute all non GTP-C traffic to the other queues.
+
+.. code-block:: console
+
+   ethtool -X <if> weight 0 1 1 1 1 1 1 1
+
+(Note: traffic is distributed with queues with weight != 0)
 
 Naming convention
 ~~~~~~~~~~~~~~~~~
@@ -235,3 +294,44 @@ The status of the service can be controlled with:
 .. code-block:: console
 
    systemctl status cluster@10
+
+When using a cluster to feed nprobe or n2disk, it is highly recommended
+to use the following naming scheme to make service dependencies explicit:
+
+APPLICATION-cluster_CLUSTERID-INSTANCEID.conf
+
+For example when using nprobe and attaching to cluster 10 queue 0 the configuration
+file path would be:
+
+.. code-block:: console
+
+   /etc/nprobe/nprobe-cluster_10-0.conf
+
+The service can be controlled with:
+
+.. code-block:: console
+
+   systemctl status nprobe@cluster_10-0
+
+A clusterctl utility is also provided in order simplify the management of cluster servicies
+and dependencies.
+
+.. code-block:: console
+
+   Usage: clusterctl {start|stop|restart|status|start-deps|stop-deps} [cluster ID(s)]
+
+For example, to start all enabled cluster services:
+
+.. code-block:: console
+
+   clusterctl start
+
+Or to restart all services (e.g. nprobe) requiring a specific cluster instance (ID = 10):
+
+.. code-block:: console
+
+   clusterctl stop-deps 10
+   clusterctl start-deps 10
+
+By omitting the cluster ID, the specified action applies to all cluster instances.
+

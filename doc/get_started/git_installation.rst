@@ -74,7 +74,7 @@ and load the corresponding driver using the *load_driver.sh* script in the drive
 .. code-block:: console
 
    cd PF_RING/drivers/intel
-   make
+   ./configure && make
    cd ixgbe/ixgbe-*-zc/src
    sudo ./load_driver.sh
 
@@ -137,7 +137,7 @@ PF_RING Additional Modules
 The PF_RING library has a modular architecture, making it possible to use additional 
 capture modules other than the standard PF_RING kernel module. These components are 
 enabled at runtime based on the actual adapter being used. PF_RING modules currently 
-include support for Accolade, Endace DAG, Exablaze, Fiberblaze, Myricom, Napatech, 
-and others, please also read the `Drivers and Modules <http://www.ntop.org/guides/pf_ring/modules/index.html>`_
+include support for Fiberblaze, Napatech, and others, please also read the
+`Drivers and Modules <http://www.ntop.org/guides/pf_ring/modules/index.html>`_
 section.
 

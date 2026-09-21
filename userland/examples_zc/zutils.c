@@ -1,5 +1,5 @@
 /*
- * (C) 2003-20 - ntop 
+ * (C) 2003-26 - ntop 
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,13 +28,40 @@
 
 /* *************************************** */
 
-#define N2DISK_METADATA             16
-#define N2DISK_CONSUMER_QUEUE_LEN 8192
-#define N2DISK_PREFETCH_BUFFERS     32
-
 #define MAX_NUM_OPTIONS             64
 
 #define DEFAULT_CLUSTER_ID          99
+
+/* *************************************** */
+
+/* Get nsec time from date (2022-01-30 14:30:55.123456789) */
+static int str2nsec(char *timestr, struct timespec *ts) {
+  struct tm tm = { 0 };
+  char *nsecstr = strchr(timestr, '.');
+
+  ts->tv_sec = 0;
+  ts->tv_nsec = 0;
+
+  /* nsec */
+
+  if (nsecstr != NULL) {
+    nsecstr[0] = '\0';
+    nsecstr++; 
+    ts->tv_nsec = atoi(nsecstr);
+  }
+
+  /* sec */
+
+  if (!strptime(timestr, "%Y-%m-%d %H:%M:%S", &tm)) {
+    fprintf(stderr, "Unable to parse %s: invalid format", timestr);
+    return -1;
+  }
+
+  tm.tm_isdst = -1;
+  ts->tv_sec = mktime(&tm);
+
+  return 0;
+}
 
 /* *************************************** */
 

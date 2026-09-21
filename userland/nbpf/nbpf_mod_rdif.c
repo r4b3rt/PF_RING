@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-22 ntop.org
+ *  Copyright (C) 2016-26 ntop
  *
  *      http://www.ntop.org/
  *
@@ -10,7 +10,7 @@
  *
  */
 
-#ifdef linux
+#ifdef __linux__
 
 #include <stdio.h>
 #include <string.h>
@@ -798,7 +798,7 @@ static int __nbpf_rdif_interface_clear(nbpf_rdif_handle_t *handle) {
  *     - 1 on success
  */
 /* -------------------------------------------------- */
-int nbpf_rdif_set_filter(nbpf_rdif_handle_t *handle, char *bpf) {
+int nbpf_rdif_set_filter(nbpf_rdif_handle_t *handle, const char *bpf) {
 #ifdef HAVE_REDIRECTOR_F
   nbpf_tree_t *tree;
   nbpf_rule_list_item_t *pun;

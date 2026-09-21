@@ -1,6 +1,6 @@
 /*
  *
- * (C) 2005-22 - ntop.org
+ * (C) 2005-26 - ntop
  *
  *
  * This program is free software; you can redistribute it and/or modify
@@ -64,7 +64,7 @@
 #include <librdi.h>
 #endif
 
-#define MAX_CAPLEN             65535
+#define MAX_CAPLEN             65600 /* L2 + IP + Max IP payload (65535) + alignment */
 #define PAGE_SIZE               4096
 
 #define DEFAULT_POLL_DURATION   500
@@ -182,7 +182,8 @@ typedef struct pfring_if {
     int device;
     int function;
   } bus_id;
-  int status; /* 1: up, 0: down*/
+  int ifindex;
+  int status; /* 1: up, 0: down, -1: unknown */
   int license; /* 1: valid, 0: invalid or not installed */
   time_t license_expiration; /* expiration epoch */
   struct pfring_if *next;
@@ -201,7 +202,7 @@ struct __pfring {
   u_int8_t disable_timestamp;
   u_int8_t ixia_timestamp_enabled;
 
-  u_int8_t vss_apcon_timestamp_enabled;
+  u_int8_t __padding_0;
   u_int8_t chunk_mode_enabled;
   u_int8_t userspace_bpf;
   u_int8_t force_userspace_bpf;
@@ -263,7 +264,7 @@ struct __pfring {
   int       (*get_selectable_fd)            (pfring *);
   int       (*set_direction)                (pfring *, packet_direction);
   int       (*set_socket_mode)              (pfring *, socket_mode);
-  int       (*set_cluster)                  (pfring *, u_int, cluster_type);
+  int       (*set_cluster_consumer)         (pfring *, u_int16_t, u_int16_t, cluster_type, u_int32_t);
   int       (*remove_from_cluster)          (pfring *);
   int       (*set_master_id)                (pfring *, u_int32_t);
   int       (*set_master)                   (pfring *, pfring *);
@@ -288,13 +289,14 @@ struct __pfring {
   int       (*get_device_ifindex)           (pfring *, char *, int *);
   u_int16_t (*get_slot_header_len)          (pfring *);
   int       (*set_virtual_device)           (pfring *, virtual_filtering_device_info *);
+  int       (*set_default_hw_action)        (pfring *, generic_default_action_type);
   int       (*add_hw_rule)                  (pfring *, hw_filtering_rule *);
   int       (*remove_hw_rule)               (pfring *, u_int16_t);
   int       (*loopback_test)                (pfring *, char *, u_int, u_int);
   int       (*enable_ring)                  (pfring *);
   int       (*disable_ring)                 (pfring *);
   void      (*shutdown)                     (pfring *);
-  int       (*set_bpf_filter)               (pfring *, char *);
+  int       (*set_bpf_filter)               (pfring *, const char *);
   int       (*remove_bpf_filter)            (pfring *);
   int       (*get_device_clock)             (pfring *, struct timespec *);
   int       (*set_device_clock)             (pfring *, struct timespec *);
@@ -305,7 +307,7 @@ struct __pfring {
   int       (*register_zerocopy_tx_ring)    (pfring *, pfring *);
   int       (*recv_chunk)                   (pfring *, void **, pfring_chunk_info *, u_int8_t); 
   int       (*recv_burst)                   (pfring *, pfring_packet_info *, u_int8_t, u_int8_t); 
-  int       (*set_bound_dev_name)           (pfring *, char *);
+  int       (*recv_flow)                    (pfring *, pfring_flow_update *, u_int8_t);
   int       (*get_metadata)         	    (pfring *, u_char **, u_int32_t *);
   u_int32_t (*get_interface_speed)	    (pfring *);
   int       (*get_link_type)		    (pfring *);
@@ -324,15 +326,17 @@ struct __pfring {
   char *slots;
   char *device_name;
 
+  u_int32_t flags;
   u_int32_t caplen;
+
   u_int16_t slot_header_len;
   u_int16_t mtu /* 0 = unknown */;
-
   u_int32_t sampling_rate;
+
   u_int32_t sampling_counter;
+  u_int32_t sampling_rnd_shift;
 
   packet_slicing_level slicing_level;
-
   u_int32_t slicing_additional_bytes;
 
   int fd;
@@ -342,18 +346,16 @@ struct __pfring {
 
   u_int32_t poll_sleep;
   u_int16_t poll_duration;
-
   u_int8_t promisc;
   u_int8_t ft_enabled; /* PF_RING FT support enabled */
+
   u_int8_t reentrant;
   u_int8_t break_recv_loop;
-
-  u_long num_poll_calls;
+  u_int16_t __padding_1;
+  u_int32_t num_poll_calls;
 
   pfring_rwlock_t rx_lock;
   pfring_rwlock_t tx_lock;
-
-  u_int32_t flags;
 
   void *ft; /* PF_RING FT handle */
 
@@ -364,6 +366,8 @@ struct __pfring {
 
   /* Semi-ZC devices (1-copy) */
   pfring *one_copy_rx_pfring;
+
+  pthread_t runtime_manager_thread;
 };
 
 /* ********************************* */
@@ -383,18 +387,19 @@ struct __pfring {
 #define PF_RING_IXIA_TIMESTAMP	       (1 << 12) /**< pfring_open() flag: Enable ixiacom.com hardware timestamp support+stripping. */
 #define PF_RING_USERSPACE_BPF	       (1 << 13) /**< pfring_open() flag: Force userspace bpf even with standard drivers (not only with ZC). */
 #define PF_RING_ZC_NOT_REPROGRAM_RSS   (1 << 14) /**< pfring_open() flag: Do not touch/reprogram hw RSS */ 
-#define PF_RING_VSS_APCON_TIMESTAMP    (1 << 15) /**< pfring_open() flag: Enable apcon.com/vssmonitoring.com hardware timestamp support+stripping. */
-#define PF_RING_ZC_IPONLY_RSS	       (1 << 16) /**< pfring_open() flag: Compute RSS on src/dst IP only (not 4-tuple) */ 
-#define PF_RING_FLOW_OFFLOAD	       (1 << 17) /**< pfring_open() flag: Enable hw flow table support when available */ 
-#define PF_RING_FLOW_OFFLOAD_NOUPDATES (1 << 18) /**< pfring_open() flag: Do not send flow updates with PF_RING_FLOW_OFFLOAD (enable support for flows shunting only) */
-#define PF_RING_FLOW_OFFLOAD_NORAWDATA (1 << 19) /**< pfring_open() flag: Do not send raw packets with PF_RING_FLOW_OFFLOAD */
+//#define PF_RING_XXX                  (1 << 15) /**< pfring_open() flag: Flag not used */
+#define PF_RING_ZC_IPONLY_RSS	       (1 << 16) /**< pfring_open() flag: Compute RSS on src/dst IP only (Intel ixgbe and NVIDIA Mellanox only) */ 
+#define PF_RING_FLOW_OFFLOAD	       (1 << 17) /**< pfring_open() flag: Enable Flow offload (Flow Manager on Napatech) */ 
+#define PF_RING_FLOW_OFFLOAD_NOUPDATES (1 << 18) /**< pfring_open() flag: Disable periodic updates when PF_RING_FLOW_OFFLOAD is used */
+#define PF_RING_KEEP_CRC               (1 << 19) /**< pfring_open() flag: Do not calculate/add CRC/FCS when transmitting frames */
 #define PF_RING_L7_FILTERING	       (1 << 20) /**< pfring_open() flag: Enable L7 filtering support based on PF_RING FT (Flow Table with nDPI support) */
 #define PF_RING_DO_NOT_STRIP_FCS       (1 << 21) /**< pfring_open() flag: Do not strip the FCS (CRC), when not stripped out by the adapter (on standard adapters use this in combination with 'ethtool -K DEV rx-fcs on rx-all on') */
 #define PF_RING_TX_BPF	               (1 << 22) /**< pfring_open() flag: Evaluate bpf also for transmitted packets (this also force userspace bpf). */
-#define PF_RING_FLOW_OFFLOAD_TUNNEL    (1 << 23) /**< pfring_open() flag: Enable tunnel dissection with flow offload */
+#define PF_RING_FLOW_OFFLOAD_RESET     (1 << 23) /**< pfring_open() flag: Reset hardware flow table when PF_RING_FLOW_OFFLOAD is used */
 #define PF_RING_DISCARD_INJECTED_PKTS  (1 << 24) /**< pfring_open() flag: Discard packets injected through the stack module (this avoid loops in MITM applications) */
 #define PF_RING_ARISTA_TIMESTAMP       (1 << 25) /**< pfring_open() flag: Enable Arista 7150 hardware timestamp support and stripping */
 #define PF_RING_METAWATCH_TIMESTAMP    (1 << 26) /**< pfring_open() flag: Enable Arista 7130 MetaWatch hardware timestamp support and stripping */
+#define PF_RING_HW_TIMESTAMP_UNSYNC    (1 << 27) /**< pfring_open() flag: Do not set the hw clock when using PF_RING_HW_TIMESTAMP (e.g. use PTP) */
 
 /* ********************************* */
 
@@ -537,6 +542,16 @@ int pfring_recv_parsed(pfring *ring, u_char** buffer, u_int buffer_len,
 		       u_int8_t level /* 1..4 */, u_int8_t add_timestamp, u_int8_t add_hash);
 
 /**
+ * This call returns an flow when PF_RING_FLOW_OFFLOAD is enabled (supported adapters only). 
+ * @param ring       The PF_RING handle where we perform the check.
+ * @param flowr      A struct to be filled with flow metadata.
+ * @param hdr        A memory area where the packet header will be copied.
+ * @param wait_for_flows If 0 we simply check the flow availability, otherwise the call is blocked until a packet is available. 
+ * @return 0 in case of no flow being received (non-blocking), 1 in case of success, -1 in case of error.
+ */
+int pfring_recv_flow(pfring *ring, pfring_flow_update *flow, u_int8_t wait_for_flows);
+
+/**
  * Get metadata for the last captured packet, if any. This is usually used with ZC SPSC queues for reading packet metadata.
  * @param ring
  * @param metadata Ptr to a variable that will contain the packet metadata (out).
@@ -582,6 +597,14 @@ int pfring_set_poll_duration(pfring *ring, u_int duration);
  * @return 0 on success, a negative value otherwise.
  */
 int pfring_set_tx_watermark(pfring *ring, u_int16_t watermark);
+
+/**
+ * Set a default action for filtering into the NIC.
+ * @param ring The PF_RING handle on which the default rule will be set. 
+ * @param action. The action (default_pass or default_drop).
+ * @return 0 on success, a negative value otherwise.
+ */
+int pfring_set_default_hw_action(pfring *ring, generic_default_action_type action);
 
 /**
  * Set a specified filtering rule into the NIC. Note that no PF_RING filter is added, but only a NIC filter.
@@ -762,9 +785,16 @@ int pfring_set_socket_mode(pfring *ring, socket_mode mode);
  * Clustering is also available with the PF_RING-aware libpcap via the PCAP_PF_RING_CLUSTER_ID environment variable (Round-Robin by default, 
  * per-flow via the PCAP_PF_RING_USE_CLUSTER_PER_FLOW environment variable). 
  * @param ring The  PF_RING handle to be cluster. 
- * @param clusterId A numeric identifier of the cluster to which the ring will be bound.
+ * @param cluster_id A numeric identifier of the cluster to which the ring will be bound.
+ * @param queue_id Index of the consumer queue (0 .. MAX_CLUSTER_QUEUES-1). Use MAX_CLUSTER_QUEUES or bigger to get the first available queue.
  * @param the_type  The cluster type (2-tuple, 4-tuple, 5-tuple, tcp only 5-tuple, 6-tuple flow or Round-Robin).
+ * @param options Cluster options (flags). CLUSTER_OPTION_RELAXED_DISTRIBUTION to deliver packet to the first available queue if a consumer is down.
  * @return 0 on success, a negative value otherwise.
+ */
+int pfring_set_cluster_consumer(pfring *ring, u_int16_t cluster_id, u_int16_t queue_id, cluster_type the_type, u_int32_t options);
+
+/**
+ * Deprecated: use pfring_set_cluster_consumer.
  */
 int pfring_set_cluster(pfring *ring, u_int clusterId, cluster_type the_type);
 
@@ -1037,7 +1067,7 @@ int pfring_disable_ring(pfring *ring);
  * @param filter_buffer The filter to set.
  * @return 0 on success, a negative value otherwise.
  */
-int pfring_set_bpf_filter(pfring *ring, char *filter_buffer);
+int pfring_set_bpf_filter(pfring *ring, const char *filter_buffer);
 
 /**
  * Remove the BPF filter. 
@@ -1293,7 +1323,7 @@ int pfring_handle_metawatch_hw_timestamp(u_char* buffer, struct pfring_pkthdr *h
  * @param ticks_ts          The ticks will be placed here.
  * @return 0 on success, a negative number otherwise.
  */
-int pfring_read_arista_keyframe(u_char *buffer, u_int32_t buffer_len, u_int64_t *ns_ts, u_int32_t *ticks_ts);
+int pfring_read_arista_7150_keyframe(u_char *buffer, u_int32_t buffer_len, u_int64_t *ns_ts, u_int32_t *ticks_ts);
 
 /**
  * Reads a ARISTA-formatted timestamp from an incoming packet and puts it into the timestamp variable.
@@ -1302,7 +1332,7 @@ int pfring_read_arista_keyframe(u_char *buffer, u_int32_t buffer_len, u_int64_t 
  * @param ns_ts             If found the hardware timestamp will be placed here
  * @return The length of the ARISTA timestamp.
  */
-int pfring_read_arista_hw_timestamp(u_char *buffer, u_int32_t buffer_len, u_int64_t *ns_ts);
+int pfring_read_arista_7150_hw_timestamp(u_char *buffer, u_int32_t buffer_len, u_int64_t *ns_ts);
 
 /**
  * Strip a ARISTA-formatted timestamp from an incoming packet. If the timestamp is found, the
@@ -1314,29 +1344,18 @@ int pfring_read_arista_hw_timestamp(u_char *buffer, u_int32_t buffer_len, u_int6
 int pfring_handle_arista_hw_timestamp(u_char* buffer, struct pfring_pkthdr *hdr);
 
 /**
- * Reads a VSS/APCON-formatted timestamp from an incoming packet and puts it into the timestamp variable.
- * @param buffer            Incoming packet buffer.
- * @param buffer_len        Incoming packet buffer length.
- * @param ts                If found the hardware timestamp will be placed here
- * @return The length of the VSS/APCON timestamp
- */
-int pfring_read_vss_apcon_hw_timestamp(u_char *buffer, u_int32_t buffer_len, struct timespec *ts);
-
-/**
- * Strip an VSS/APCON-formatted timestamp from an incoming packet. If the timestamp is found, the
- * hdr parameter (caplen and len fields) are decreased by the size of the timestamp.
- * @param buffer            Incoming packet buffer.
- * @param hdr               This is an in/out parameter: it is used to read the original packet len, and it is updated (size decreased) if the hw timestamp is found
- * @return 0 on success, a negative value otherwise.
- */
-void pfring_handle_vss_apcon_hw_timestamp(u_char* buffer, struct pfring_pkthdr *hdr);
-
-/**
  * Get interface speed.
  * @param ring
  * @return 0 if interface speed is unknown, the interface speed (Mbit/s) otherwise.
  */
 u_int32_t pfring_get_interface_speed(pfring *ring);
+
+/**
+ * Get interface speed by linux interface name.
+ * @param ifname The interface name.
+ * @return 0 if interface speed is unknown, the interface speed (Mbit/s) otherwise.
+ */
+u_int32_t pfring_get_ethtool_link_speed(const char *ifname);
 
 /**
  * List all interfaces.
@@ -1350,9 +1369,14 @@ pfring_if_t *pfring_findalldevs(void);
  */
 void pfring_freealldevs(pfring_if_t *list);
 
+/**
+ * Check if the prefix is a valid pf_ring module prefix
+ */
+int pfring_is_module_prefix(const char *prefix);
+
 /* ********************************* */
 
-int pfring_parse_bpf_filter(char *filter_buffer, u_int caplen,
+int pfring_parse_bpf_filter(const char *filter_buffer, u_int caplen,
  #ifdef BPF_RELEASE
                             struct bpf_program
 #else

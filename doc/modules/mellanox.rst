@@ -1,7 +1,7 @@
-Mellanox Support
-================
+NVIDIA/Mellanox Support
+=======================
 
-PF_RING (8.1 or newer) includes native support for Mellanox ConnectX-4, ConnectX-5 and ConnectX-6 adapters.
+PF_RING (8.1 or newer) includes native support for NVIDIA/Mellanox ConnectX-4, ConnectX-5 and ConnectX-6 adapters.
 Both packet capture (including RSS, packet hash, hardware timestamp support) and transmission are supported.
 
 Prerequisite
@@ -17,7 +17,13 @@ OFED SDK to be used by capture frameworks (the *--dpdk* option is available for 
 
 .. code-block:: console
 
-   cd MLNX_OFED_LINUX-5.4-1.0.3.0-ubuntu20.04-x86_64
+   cd MLNX_OFED_LINUX-*
+   ./mlnxofedinstall
+
+Note: *--upstream-libs --dpdk* were required on SDK versions <5.x:
+
+.. code-block:: console
+
    ./mlnxofedinstall --upstream-libs --dpdk
 
 Compatibility
@@ -36,10 +42,15 @@ Recommended firmware versions are:
  - ConnectX-6: >= 20.27.0090
  - ConnectX-6 Dx: >= 22.27.0090
 
+Bluefield adapters are also supported. Please note that this module
+only detects RDMA capable devices. If some devices are not RDMA-capable
+they might not appear in the list of recognized interfaces when running
+pfcount -L -v 1 on Bluefield.
+
 Configuration
 -------------
 
-Load the required modules:
+Load the required modules (not required when using the pf_ring service, which takes care of this):
 
 .. code-block:: console
 
@@ -71,12 +82,12 @@ specified as interface name, as reported by *pfcount -L*. Example:
    pfcount -i mlx:mlx5_0
 
 The default size of the RX ring (the maximum number of packets the adapter can keep in the receive
-FIFO buffer) is 4K. This can be configured using the PF_RING_RX_QUEUE_SIZE environment variable.
+FIFO buffer) is 32K. This can be configured using the PF_RING_RX_QUEUE_SIZE environment variable.
 Example:
 
 .. code-block:: console
 
-   PF_RING_RX_QUEUE_SIZE=32768 pfcount -i mlx:mlx5_0
+   PF_RING_RX_QUEUE_SIZE=4096 pfcount -i mlx:mlx5_0
 
 RSS / Multi Queue
 ~~~~~~~~~~~~~~~~~
@@ -89,6 +100,13 @@ interface. Example for 4 queues:
 .. code-block:: console
 
    ethtool -L enp1s0f0 combined 4
+
+Alternatively the number of queues can be configured on the application itself through
+environment variable (PF_RING_RSS).
+
+.. code-block:: console
+
+   PF_RING_RSS=4 pfcount_multichannel -i mlx:mlx5_0
 
 In order to capture traffic from a queue, mlx:<device>@<queue> should be used as interface
 name. Example with queue 0:
@@ -114,6 +132,47 @@ used to select the TX interface. Example:
 
    pfsend -i mlx:mlx5_0
 
+Or to send from all queues and scale the transmission performance:
+
+.. code-block:: console
+
+   pfsend_multichannel -i mlx:mlx5_0
+
+Hw Clock
+--------
+
+ConnectX adapters provide hardware packet timestamping by using an internal clock.
+Please make sure the internal hardware clock (PHC) is synced with the system clock
+to avoid applications complaining about time shifts.
+
+Install the linuxptp tool:
+
+.. code-block:: console
+
+   apt install linuxptp
+
+Read the PTP device ID for the ConnectX interface to sync:
+
+.. code-block:: console
+
+   ethtool -T ens4f0np0 | grep 'PTP Hardware Clock'
+   PTP Hardware Clock: 2
+
+Read the current clock from the ptp device (/dev/ptp<id>):
+
+.. code-block:: console
+
+   phc_ctl /dev/ptp2 get
+   phc_ctl[1782789.530]: clock time is 1749026103.583312192 or Wed Jun  4 10:35:03 2025
+
+Synchronize the hardware clock with the system time (or use your preferred synchronization method):
+
+.. code-block:: console
+
+   phc2sys -s CLOCK_REALTIME -c ens4f0np0 -O 0 -m
+
+(run this command for a few seconds to let it adjust the time)
+
 Hw Filtering
 ------------
 
@@ -123,9 +182,11 @@ In order to set an hw filter the *pfring_add_hw_rule* API should be used.
 Sample code for filtering traffic with Mellanox (as well as with other adapters) 
 is available in the *pfcount.c* sample application (look for *sample_filtering_rules*).
 
-Filtering rules can be defined as *drop* or *pass*. The default behaviour for packets,
-is defined by the promiscuous mode set using the *pfring_open* flag *PF_RING_PROMISC*.
-With the promisc set, all traffic is received by default, no traffic otherwise.
+Filtering rules can be defined as *drop* or *pass*. The default behaviour can be set
+with the *pfring_set_default_hw_action* API. When the default is not explicitly set,
+this depends on the promiscuous mode: with the promisc set, all traffic is received by 
+default (pass), no traffic otherwise (drop). Promisc is set using the *pfring_open* 
+flag *PF_RING_PROMISC*.
 
 In order to set a filtering rule, a rule ID (0..65534) should be assigned to the rule.
 This is a unique identifier that can be used to remove the rule later on. The ID can
@@ -140,6 +201,8 @@ Example setting a filtering rule to drop UDP traffic matching a src IP and desti
 
 .. code-block:: c
 
+   pfring_set_default_hw_action(socket, default_pass);
+   
    hw_filtering_rule r = { 0 };
    
    r.rule_id = FILTERING_RULE_AUTO_RULE_ID;
@@ -148,6 +211,7 @@ Example setting a filtering rule to drop UDP traffic matching a src IP and desti
    
    r.rule_family.flow_tuple_rule.action = flow_drop_rule;
    
+   r.rule_family.flow_tuple_rule.vlan_id = 10;
    r.rule_family.flow_tuple_rule.ip_version = 4;
    r.rule_family.flow_tuple_rule.src_ip.v4 = src_ip_rule;
    r.rule_family.flow_tuple_rule.protocol = IPPROTO_UDP;
@@ -168,6 +232,12 @@ Example of removing a filtering rule by ID:
 
    pfring_remove_hw_rule(socket, RULE_ID);
 
+BPF filters are also offloaded to the adapter as long as they can be automatically converted by the nBPF engine into hardware rules. Example:
+
+.. code-block:: console
+
+   pfcount -i mlx:mlx5_0 -f "vlan 10 and host 192.168.1.1"
+
 RoCEv2/RDMA Capture
 -------------------
 
@@ -180,4 +250,6 @@ enabled through the PF_RING_MLX_SNIFFER_MODE environment variable as below:
 
    PF_RING_MLX_SNIFFER_MODE=1 ./pfcount -i mlx:mlx5_0 -v 1
 
+Please note that hardware filtering (including BPF offload) does not work when this mode
+is enabled.
 

@@ -1,6 +1,6 @@
 /*
  *
- * (C) 2005-22 - ntop.org
+ * (C) 2005-26 - ntop
  *
  *
  * This program is free software; you can redistribute it and/or modify
@@ -15,11 +15,7 @@
 #include <sys/types.h>
 #include <pthread.h>
 #include <libgen.h>
-
-#include <sys/ioctl.h>
 #include <net/if.h>
-#include <linux/ethtool.h>
-
 #include <sys/socket.h>
 #include <ifaddrs.h>
 
@@ -228,7 +224,7 @@ int pfring_mod_open(pfring *ring) {
   ring->get_selectable_fd = pfring_mod_get_selectable_fd;
   ring->set_direction = pfring_mod_set_direction;
   ring->set_socket_mode = pfring_mod_set_socket_mode;
-  ring->set_cluster = pfring_mod_set_cluster;
+  ring->set_cluster_consumer = pfring_mod_set_cluster_consumer;
   ring->remove_from_cluster = pfring_mod_remove_from_cluster;
   ring->set_master_id = pfring_mod_set_master_id;
   ring->set_master = pfring_mod_set_master;
@@ -260,7 +256,6 @@ int pfring_mod_open(pfring *ring) {
   ring->remove_bpf_filter = pfring_mod_remove_bpf_filter;
   ring->shutdown = pfring_mod_shutdown;
   ring->send_last_rx_packet = pfring_mod_send_last_rx_packet;
-  ring->set_bound_dev_name = pfring_mod_set_bound_dev_name;
   ring->get_interface_speed = pfring_mod_get_interface_speed;
 
   ring->poll_duration = DEFAULT_POLL_DURATION;
@@ -317,12 +312,10 @@ int pfring_mod_set_vlan_id(pfring *ring, u_int16_t vlan_id) {
 
 /* **************************************************** */
 
-#define USE_SOCKADDR_LL
-
 int pfring_mod_bind(pfring *ring, char *device_name) {
-#ifdef USE_SOCKADDR_LL
+#ifdef RING_USE_SOCKADDR_LL
   struct sockaddr_ll sll;
-#else
+#else /* deprecated */
   struct sockaddr sa;
 #endif
 
@@ -348,7 +341,7 @@ int pfring_mod_bind(pfring *ring, char *device_name) {
   ring->sock_tx.sll_protocol = htons(ETH_P_ALL);
 
   for (it = device->elems; it != NULL; it=it->next) {
-#ifdef USE_SOCKADDR_LL
+#ifdef RING_USE_SOCKADDR_LL
     if (pfring_mod_get_device_ifindex(ring, it->ifname, &ifindex) == 0) {
       memset(&sll, 0, sizeof(sll));
 
@@ -360,7 +353,7 @@ int pfring_mod_bind(pfring *ring, char *device_name) {
     } else {
       rc = -1;
     }
-#else
+#else /* deprecated */
     memset(&sa, 0, sizeof(sa));
     sa.sa_family = PF_RING;
     if (strlen(it->ifname > sizeof(sa.sa_data))) {
@@ -626,13 +619,16 @@ int pfring_mod_set_master(pfring *ring, pfring *master) {
 
 /* ******************************* */
 
-int pfring_mod_set_cluster(pfring *ring, u_int clusterId, cluster_type the_type) {
+int pfring_mod_set_cluster_consumer(pfring *ring, u_int16_t cluster_id, u_int16_t queue_id,
+    cluster_type the_type, u_int32_t options) {
   struct add_to_cluster cluster;
-  cluster.clusterId = clusterId, cluster.the_type = the_type;
+  cluster.cluster_id = cluster_id;
+  cluster.queue_id = queue_id;
+  cluster.the_type = the_type;
+  cluster.options = options;
 
   return(setsockopt(ring->fd, 0, SO_ADD_TO_CLUSTER, &cluster, sizeof(cluster)));
 }
-
 
 /* ******************************* */
 
@@ -675,7 +671,7 @@ int pfring_mod_toggle_filtering_policy(pfring *ring, u_int8_t rules_default_acce
 /* **************************************************** */
 
 int pfring_mod_enable_rss_rehash(pfring *ring) {
-  char dummy;
+  char dummy = '\0';
 
   return(setsockopt(ring->fd, 0, SO_REHASH_RSS_PACKET, &dummy, sizeof(dummy)));
 }
@@ -897,13 +893,34 @@ int pfring_mod_get_device_ifindex(pfring *ring, char *device_name, int *if_index
 
   memset(buffer, 0, sizeof(buffer));
   strncpy(buffer, device_name, sizeof(buffer) - 1);
-  
+ 
+  /* Device ifindex lookup via PF_RING */ 
   rc = getsockopt(ring->fd, 0, SO_GET_DEVICE_IFINDEX, buffer, &len);
 
-  if (rc < 0)
-    return rc;
+  if (rc < 0) {
+    /* Try with a DGRAM socket in case interface is an alias */
+    int sockfd;
+    struct ifreq ifr;
 
-  memcpy(if_index, buffer, sizeof(*if_index));
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0)
+      return rc;
+
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, device_name, sizeof(ifr.ifr_name)-1);
+
+    if (ioctl(sockfd, SIOCGIFINDEX, &ifr) == -1) {
+      close(sockfd);
+      return rc;
+    }
+
+    *if_index = ifr.ifr_ifindex;
+
+    close(sockfd);
+  } else {
+    memcpy(if_index, buffer, sizeof(*if_index));
+  }
+
   return 0;
 }
 
@@ -944,12 +961,12 @@ int __pfring_mod_remove_bpf_filter(pfring *ring) {
 
 /* **************************************************** */
 
-int pfring_mod_set_bpf_filter(pfring *ring, char *filter_buffer) {
+int pfring_mod_set_bpf_filter(pfring *ring, const char *filter_buffer) {
   int rc = -1;
 #ifdef ENABLE_BPF
   pcap_t *p;
   struct bpf_program filter;
-  struct sock_fprog  fcode;
+  struct sock_fprog  fcode = { 0 };
 #ifdef SKF_AD_VLAN_TAG_PRESENT
   int bpf_extensions;
   socklen_t len = sizeof(bpf_extensions);
@@ -978,7 +995,7 @@ int pfring_mod_set_bpf_filter(pfring *ring, char *filter_buffer) {
     p->bpf_codegen_flags |= BPF_SPECIAL_VLAN_HANDLING;
 #endif
 
-  rc = pcap_compile(p, &filter, filter_buffer, 0, 0);
+  rc = pcap_compile(p, &filter, filter_buffer, 1, 0);
 
   pcap_close(p);
 
@@ -1038,6 +1055,9 @@ int pfring_mod_send_last_rx_packet(pfring *ring, int tx_interface_id) {
   if(!ring->tx.enabled_rx_packet_send)
     return(PF_RING_ERROR_WRONG_CONFIGURATION);
 
+  if(unlikely(ring->reentrant || (!ring->long_header)))
+    return(PF_RING_ERROR_NOT_SUPPORTED);
+
   if(ring->tx.last_received_hdr == NULL)
     return(PF_RING_ERROR_NO_PKT_AVAILABLE); /* We have not yet read a single packet */
   
@@ -1056,90 +1076,17 @@ void pfring_mod_shutdown(pfring *ring) {
 /* **************************************************** */
 
 int pfring_mod_set_bound_dev_name(pfring *ring, char *custom_dev_name) {
-   return(setsockopt(ring->fd, 0, SO_SET_CUSTOM_BOUND_DEV_NAME, 
-		     custom_dev_name, strlen(custom_dev_name)));
-}
+  if (!custom_dev_name)
+    return PF_RING_ERROR_INVALID_ARGUMENT;
 
-/* *************************************** */
-
-#ifndef SPEED_UNKNOWN
-#define SPEED_UNKNOWN		-1
-#endif
-
-static u_int32_t __ethtool_get_link_settings(const char *ifname) {
-  int sock, rc;
-  struct ifreq ifr;
-  struct ethtool_cmd edata;
-  u_int32_t speed = 0;
-  const char *col;
-#ifdef USE_ETHTOOL_GLINKSETTINGS
-  struct {
-    struct ethtool_link_settings edata;
-    uint32_t link_mode_data[3 *	ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32];
-  } ecmd;
-#endif
-
-  col = strchr(ifname, ':');
-
-  if (col != NULL)
-    ifname = &col[1];
-
-  sock = socket(PF_INET, SOCK_DGRAM, 0 /* IPPROTO_IP */);
-
-  if (sock < 0) {
-    fprintf(stderr, "Socket error [%s]\n", ifname);
-    return speed;
-  }
-
-  memset(&ifr, 0, sizeof(struct ifreq));
-  strncpy(ifr.ifr_name, ifname, IFNAMSIZ-1);
-
-#ifdef USE_ETHTOOL_GLINKSETTINGS
-  /* Try with ETHTOOL_GLINKSETTINGS first */
-
-  memset(&ecmd, 0, sizeof(ecmd));
-  ecmd.edata.cmd = ETHTOOL_GLINKSETTINGS;
-  ifr.ifr_data = (void *) &ecmd;
-	
-  rc = ioctl(sock, SIOCETHTOOL, &ifr);
-
-  if (rc == 0) {
-
-    speed = ecmd.edata.speed;
-
-  } else 
-#endif
-  {
-
-    /* Try with ETHTOOL_GSET */
-
-    memset(&edata, 0, sizeof(struct ethtool_cmd));
-    edata.cmd = ETHTOOL_GSET;
-    ifr.ifr_data = (char *) &edata;
-
-    rc = ioctl(sock, SIOCETHTOOL, &ifr);
-
-    if (rc == 0) {
-
-      speed = ethtool_cmd_speed(&edata);
-
-    } else {
-      fprintf(stderr, "error reading link speed on %s\n", ifname);
-    }  
-  }  
-
-  close(sock);
-
-  if (speed == SPEED_UNKNOWN)
-    speed = 0;
-
-  return speed;
+  return(setsockopt(ring->fd, 0, SO_SET_CUSTOM_BOUND_DEV_NAME, 
+		    custom_dev_name, strlen(custom_dev_name)));
 }
 
 /* *************************************** */
 
 u_int32_t pfring_mod_get_interface_speed(pfring *ring) {
-  return __ethtool_get_link_settings(ring->device_name);
+  return pfring_get_ethtool_link_speed(ring->device_name);
 }
  
 /* *************************************** */
@@ -1160,6 +1107,29 @@ static void __read_device_bus_id(char *device_name, pfring_if_t *dev) {
     sscanf(busid_str, "%04X:%02X:%02X.%X", 
       &dev->bus_id.slot, &dev->bus_id.bus, &dev->bus_id.device, &dev->bus_id.function);
   }
+}
+
+/* *************************************** */
+
+static int __get_iface_ifindex(const char *ifname) {
+  int sockfd;
+  struct ifreq ifr;
+
+  sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sockfd < 0)
+    return -1;
+
+  memset(&ifr, 0, sizeof(ifr));
+  strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name)-1);
+
+  if (ioctl(sockfd, SIOCGIFINDEX, &ifr) == -1) {
+    close(sockfd);
+    return -1;
+  }
+
+  close(sockfd);
+
+  return ifr.ifr_ifindex;
 }
 
 /* *************************************** */
@@ -1223,6 +1193,7 @@ pfring_if_t *pfring_mod_findalldevs() {
       tmp->system_name = strdup(ifa->ifa_name);
       tmp->status = !!(ifa->ifa_flags & IFF_UP);
       __read_device_bus_id(ifa->ifa_name, tmp);
+      tmp->ifindex = __get_iface_ifindex(ifa->ifa_name);
 
       if (last == NULL) { last = tmp; list = tmp; }
       else { last->next = tmp; last = last->next; }

@@ -1,5 +1,5 @@
 /*
- * (C) 2017-22 - ntop
+ * (C) 2024-26 - ntop
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -47,12 +47,115 @@
 
 #include "pfutils.c"
 
-#define DEFAULT_DEVICE     "anic:0"
+#define ALARM_SLEEP      1
+#define DEFAULT_DEVICE   "nt:0"
+#define NO_ZC_BUFFER_LEN 9018
+#define MAX_NUM_THREADS  64
 
 pfring *pd = NULL;
-pcap_dumper_t *dumper = NULL;
-int verbose = 0, num_threads = 1;
-u_int8_t wait_for_packet = 1, quiet = 0;
+int num_threads = 1;
+static struct timeval startTime;
+u_int8_t do_shutdown = 0, add_rules = 1, quiet = 0, verbose = 0;
+
+struct app_stats {
+  u_int64_t numPkts[MAX_NUM_THREADS];
+  u_int64_t numBytes[MAX_NUM_THREADS];
+};
+
+struct app_stats *stats = NULL;
+
+/* ************************************ */
+
+void print_stats() {
+  pfring_stat pfringStat;
+  struct timeval endTime;
+  double delta_last;
+  static u_int8_t print_all;
+  static u_int64_t lastPkts = 0;
+  static u_int64_t lastBytes = 0;
+  static u_int64_t lastDrops = 0;
+  double pktDiff, dropDiff, bytesDiff;
+  static struct timeval lastTime;
+  char buf[256], buf1[64], buf2[64], buf3[64], buf4[64], buf5[64], timebuf[128];
+  u_int64_t delta_abs;
+
+  if(startTime.tv_sec == 0) {
+    gettimeofday(&startTime, NULL);
+    print_all = 0;
+  } else
+    print_all = 1;
+
+  gettimeofday(&endTime, NULL);
+  delta_last = delta_time(&endTime, &startTime);
+
+  if(pfring_stats(pd, &pfringStat) >= 0) {
+    double thpt;
+    int i;
+    unsigned long long nBytes = 0, nPkts = 0;
+
+    for(i=0; i < num_threads; i++) {
+      nBytes += stats->numBytes[i];
+      nPkts += stats->numPkts[i];
+    }
+
+    delta_abs = delta_time(&endTime, &startTime);
+    snprintf(buf, sizeof(buf),
+             "Duration: %s\n"
+             "Packets:  %lu\n"
+             "Dropped:  %lu\n"
+             "Bytes:    %lu\n",
+             msec2dhmsm(delta_abs, timebuf, sizeof(timebuf)),
+             (long unsigned int) nPkts,
+             (long unsigned int) pfringStat.drop,
+             (long unsigned int) nBytes);
+    pfring_set_application_stats(pd, buf);
+
+    thpt = ((double)8*nBytes)/(delta_last*1000);
+
+    fprintf(stderr, "=========================\n"
+	    "Absolute Stats: [%s pkts total][%s pkts dropped]",
+	    pfring_format_numbers((double)(nPkts + pfringStat.drop), buf2, sizeof(buf2), 0),
+	    pfring_format_numbers((double)(pfringStat.drop), buf3, sizeof(buf3), 0));
+
+    fprintf(stderr, "[%.1f%% dropped]",
+	    pfringStat.drop == 0 ? 0 : (double)(pfringStat.drop*100)/(double)(nPkts + pfringStat.drop));
+
+    fprintf(stderr, "\n[%s pkts rcvd][%s bytes rcvd]",
+	    pfring_format_numbers((double)nPkts, buf1, sizeof(buf1), 0),
+	    pfring_format_numbers((double)nBytes, buf2, sizeof(buf2), 0));
+
+    if(print_all)
+      fprintf(stderr, "[%s pps][%s Mbit/sec]\n",
+	      pfring_format_numbers((double)(nPkts*1000)/delta_last, buf1, sizeof(buf1), 1),
+	      pfring_format_numbers(thpt, buf2, sizeof(buf2), 1));
+    else
+      fprintf(stderr, "\n");
+
+    if(print_all && (lastTime.tv_sec > 0)) {
+      delta_last = delta_time(&endTime, &lastTime);
+      pktDiff = nPkts-lastPkts;
+      dropDiff = pfringStat.drop-lastDrops;
+      bytesDiff = nBytes - lastBytes;
+      bytesDiff /= (1000*1000*1000)/8;
+
+      snprintf(buf, sizeof(buf),
+	      "Actual Stats: [%s pkts rcvd][%s ms][%s pps][%s Gbps][%s drop/sec]",
+	      pfring_format_numbers(pktDiff, buf5, sizeof(buf5), 0),
+	      pfring_format_numbers(delta_last, buf1, sizeof(buf1), 1),
+	      pfring_format_numbers(((double)pktDiff/(double)(delta_last/1000)),  buf2, sizeof(buf2), 1),
+	      pfring_format_numbers(((double)bytesDiff/(double)(delta_last/1000)),  buf4, sizeof(buf4), 1),
+	      pfring_format_numbers(((double)dropDiff/(double)(delta_last/1000)),  buf3, sizeof(buf3), 1));
+
+      fprintf(stderr, "=========================\n%s\n", buf);
+    }
+
+    lastPkts = nPkts, lastBytes = nBytes, lastDrops = pfringStat.drop;
+  }
+
+  lastTime.tv_sec = endTime.tv_sec, lastTime.tv_usec = endTime.tv_usec;
+
+  fprintf(stderr, "=========================\n\n");
+}
 
 /* ************************************ */
 
@@ -62,99 +165,184 @@ void sigproc(int sig) {
   fprintf(stderr, "Leaving...\n");
   if (called) return; else called = 1;
 
+  do_shutdown = 1;
+
+  if (!quiet)
+    print_stats();
+
   pfring_breakloop(pd);
 }
 
 /* ******************************** */
 
-void processPacket(const u_char *p, int len, u_int32_t flow_id) {
-  char buffer[256];
-  hw_filtering_rule r;
+void processFlow(pfring_flow_update *flow){
 
-  if (!quiet) {
-    buffer[0] = '\0';
-    pfring_print_pkt(buffer, sizeof(buffer), p, len, len);
-    printf("Raw Packet with flowID = %u %s", flow_id, buffer);
+  printf("Flow #%lu ", flow->flow_id);
+
+  switch (flow->cause) {
+    /* Flow stats update (periodic) */
+    case PF_RING_FLOW_UPDATE_CAUSE_PERIODIC:
+      printf("periodic update");
+      break;
+    /* Flow unlearned */
+    case PF_RING_FLOW_UPDATE_CAUSE_SW:
+      printf("removed (by FlowWrite)");
+      break;
+    case PF_RING_FLOW_UPDATE_CAUSE_TIMEOUT:
+      printf("removed (timeout)");
+      break;
+    case PF_RING_FLOW_UPDATE_CAUSE_TCP_TERM:
+      printf("removed (TCP termination)");
+      break;
+    case PF_RING_FLOW_UPDATE_CAUSE_PROBE:
+      printf("removed (Software probe?)");
+      break;
+    default:
+      printf("(Unknown cause)");
+      break;
   }
 
-  /* Discarding all future packets for this flow */
+  switch (flow->cause) {
+    case PF_RING_FLOW_UPDATE_CAUSE_PERIODIC:
+    case PF_RING_FLOW_UPDATE_CAUSE_SW:
+    case PF_RING_FLOW_UPDATE_CAUSE_TIMEOUT:
+    case PF_RING_FLOW_UPDATE_CAUSE_TCP_TERM:
+    case PF_RING_FLOW_UPDATE_CAUSE_PROBE:
+      printf(" flags=%02x/%02x packets=%u/%u bytes=%ju/%ju",
+             flow->flags_out,
+             flow->flags_in,
+             flow->packets_out,
+             flow->packets_in,
+             flow->bytes_out,
+             flow->bytes_in);
+      break;
+    default:
+      break;
+  }
 
-  r.rule_family_type = generic_flow_id_rule;
-
-  /* Note: you can also specify 'flow_mark_rule' here to mark all packets for this flow, 
-   * you can check the marker with (h->extended_hdr.flags & PKT_FLAGS_FLOW_OFFLOAD_MARKER) */
-  r.rule_family.flow_id_rule.action = flow_drop_rule;
-
-  r.rule_family.flow_id_rule.thread = 0;
-  r.rule_family.flow_id_rule.flow_id = flow_id;
-
-  pfring_add_hw_rule(pd, &r);
+  printf("\n");
 }
 
 /* ******************************** */
 
-void processFlow(generic_flow_update *flow){
-  char buf1[30], buf2[30];
-  char *ip1, *ip2;
-
-  if (flow->ip_version == 4){
-    ip1 = _intoa(flow->src_ip.v4, buf1, sizeof(buf1));
-    ip2 = _intoa(flow->dst_ip.v4, buf2, sizeof(buf2));
-  } else {
-    ip1 = (char *) inet_ntop(AF_INET6, &flow->src_ip.v6.s6_addr, buf1, sizeof(buf1));
-    ip2 = (char *) inet_ntop(AF_INET6, &flow->dst_ip.v6.s6_addr, buf2, sizeof(buf2));
-  }
-
-  if (!quiet) {
-    printf("Flow Update: flowID = %u "
-           "srcIp = %s dstIp = %s srcPort = %u dstPort = %u protocol = %u tcpFlags = 0x%02X "
-           "fwd: Packets = %u Bytes = %ju FirstTime = %u.%u LastTime = %u.%u "
-           "rev: Packets = %u Bytes = %ju FirstTime = %u.%u LastTime = %u.%u\n",
-	   flow->flow_id, ip1, ip2, flow->src_port, flow->dst_port, flow->l4_protocol, flow->tcp_flags,
-           flow->fwd_packets, flow->fwd_bytes, flow->fwd_ts_first.tv_sec, flow->fwd_ts_first.tv_nsec, flow->fwd_ts_last.tv_sec, flow->fwd_ts_last.tv_nsec,
-           flow->rev_packets, flow->rev_bytes, flow->rev_ts_first.tv_sec, flow->rev_ts_first.tv_nsec, flow->rev_ts_last.tv_sec, flow->rev_ts_last.tv_nsec);
-  }
-}
-
-/* ******************************** */
-
-void flowDump(struct pcap_pkthdr *h, generic_flow_update *f) {
-  u_char data[sizeof(struct ether_header) + sizeof(generic_flow_update)];
-  struct ether_header *ehdr = (struct ether_header *) data;
-  
-  memset(data, 0, sizeof(data));
-
-  ehdr->ether_type = 0xF0;
-  memcpy(&data[sizeof(struct ether_header)], f, sizeof(generic_flow_update));
-
-  h->len = h->caplen = sizeof(struct ether_header) + sizeof(generic_flow_update);
-
-  pcap_dump((u_char *) dumper, (struct pcap_pkthdr *) h, data);
-  pcap_dump_flush(dumper);
-}
-
-/* ******************************** */
-
-void processBuffer(const struct pfring_pkthdr *h,
+void processPacket(const struct pfring_pkthdr *h,
 		   const u_char *p, const u_char *user_bytes) {
+  char buffer[256];
+  static u_int64_t flow_id = 0;
+  int threadId = 0;
 
-  if (h->extended_hdr.flags & PKT_FLAGS_FLOW_OFFLOAD_UPDATE) {
-    processFlow((generic_flow_update *) p);
-    if (dumper != NULL) flowDump((struct pcap_pkthdr *) h, (generic_flow_update *) p);
-  } else {
-    processPacket(p, h->len, h->extended_hdr.pkt_hash);
+  stats->numPkts[threadId]++;
+  stats->numBytes[threadId] += h->len+24 /* 8 Preamble + 4 CRC + 12 IFG */ + 1000;
+
+  if (verbose == 2) {
+
+    buffer[0] = '\0';
+    pfring_print_pkt(buffer, sizeof(buffer), p, h->len, h->len);
+
+    printf("%s ", buffer);
+
+    if (h->extended_hdr.flags & PKT_FLAGS_FLOW_HIT) {
+      printf("[HIT]");
+    } else if (h->extended_hdr.flags & PKT_FLAGS_FLOW_MISS) {
+      printf("[MISS]");
+    } else if (h->extended_hdr.flags & PKT_FLAGS_FLOW_UNHANDLED) {
+      printf("[UNHANDLED]");
+    } else {
+      printf("[-]");
+    }
+  }
+
+  if (h->extended_hdr.flags & PKT_FLAGS_FLOW_MISS) {
+    /* Miss: add to hw flow table */
+
+    memset((void *) &h->extended_hdr.parsed_pkt, 0, sizeof(struct pkt_parsing_info));
+    pfring_parse_pkt((u_char *) p, (struct pfring_pkthdr *) h, 5, 0, 1);
+
+    /* Discard all future packets for this flow */
+
+    if (add_rules && h->extended_hdr.parsed_pkt.ip_version == 4 /* TODO IPv6 */) {
+      hw_filtering_rule rule = { 0 };
+      generic_flow_tuple_hw_rule *r = &rule.rule_family.flow_tuple_rule;
+      rule.rule_family_type = generic_flow_tuple_rule;
+
+      r->action = ((add_rules == 1) ? flow_drop_rule : flow_pass_rule);
+      r->flow_id = flow_id++;
+      r->ip_version = h->extended_hdr.parsed_pkt.ip_version;
+      r->src_ip.v4 = h->extended_hdr.parsed_pkt.ipv4_src;
+      r->dst_ip.v4 = h->extended_hdr.parsed_pkt.ipv4_dst;
+      r->src_port = h->extended_hdr.parsed_pkt.l4_src_port;
+      r->dst_port = h->extended_hdr.parsed_pkt.l4_dst_port;
+      r->protocol = h->extended_hdr.parsed_pkt.l3_proto; 
+
+      if (pfring_add_hw_rule(pd, &rule) < 0) {
+        fprintf(stderr, "pfring_add_hw_rule failure\n");
+      } else {
+        if (verbose == 2)
+          printf("[CALL-OFFLOAD]");
+      }
+    }
+  }
+
+  if (verbose == 2)
+    printf("\n");
+}
+
+/* *************************************** */
+
+void packet_consumer() {
+  u_char buffer[NO_ZC_BUFFER_LEN];
+  u_char *buffer_p = buffer;
+  struct pfring_pkthdr hdr;
+  pfring_flow_update flow;
+
+  memset(&hdr, 0, sizeof(hdr));
+  memset(&flow, 0, sizeof(flow));
+
+  while(!do_shutdown) {
+
+    if (verbose >= 1) {
+      while (!do_shutdown && pfring_recv_flow(pd, &flow, 0) > 0) {
+        /* Process flow */
+        processFlow(&flow);
+      }
+    }
+
+    if (pfring_recv(pd, &buffer_p, NO_ZC_BUFFER_LEN, &hdr, 0) > 0) {
+      /* Process packet */
+      processPacket(&hdr, buffer, NULL);
+    } else {
+      if (do_shutdown)
+        break;
+
+      usleep(1);
+      //sched_yield();
+    }
   }
 }
 
 /* *************************************** */
 
 void printHelp(void) {
-  printf("pfflow_offload - (C) 2017-22 ntop.org\n");
-  printf("Flow processing based on hardware offload\n\n");
+  printf("pfflow_offload - (C) 2024-26 ntop\n");
+  printf("Flow processing based on hardware offload (Napatech Flow Manager)\n\n");
   printf("-h              Print this help\n");
   printf("-i <device>     Device name. Use:\n");
-  printf("-o <path>       Dump flows to pcap\n");
-  printf("-r              Disable raw packets (flow updates only)\n");
+  printf("-r <0|1|2>      Add hardware flow rules to Drop (1) or Pass (2) packets (Default: 1)\n");
+  printf("-u              Enable periodic updates\n");
+  printf("-g <core>       CPU core affinity\n");
+  printf("-v <level>      Verbose (1: flows, 2: packets+flows)\n");
+  printf("-q              Quiet\n");
+}
+
+/* *************************************** */
+
+void my_sigalarm(int sig) {
+  if (do_shutdown)
+    return;
+
+  print_stats();
+  alarm(ALARM_SLEEP);
+  signal(SIGALRM, my_sigalarm);
 }
 
 /* *************************************** */
@@ -164,18 +352,13 @@ int main(int argc, char* argv[]) {
   int promisc, snaplen = 1518, rc;
   u_int32_t flags = 0;
   int bind_core = -1;
-  char *out_pcap_file = NULL;
+  int periodic_updates = 0;
   packet_direction direction = rx_only_direction;
 
-  flags |= PF_RING_FLOW_OFFLOAD;
-
-  while ((c = getopt(argc,argv,"ag:hi:o:r")) != '?') {
+  while ((c = getopt(argc,argv,"g:hi:r:uv:q")) != '?') {
     if ((c == 255) || (c == -1)) break;
 
     switch(c) {
-    case 'a':
-      wait_for_packet = 0;
-      break;
     case 'g':
       bind_core = atoi(optarg);
       break;
@@ -186,25 +369,33 @@ int main(int argc, char* argv[]) {
     case 'i':
       device = strdup(optarg);
       break;
-    case 'o':
-      out_pcap_file = optarg;
-      if (strcmp(out_pcap_file, "-") == 0) quiet = 1; 
-      break;
     case 'r':
-      flags |= PF_RING_FLOW_OFFLOAD_NORAWDATA;
+      add_rules = atoi(optarg);
+      break;
+    case 'u':
+      periodic_updates = 1;
+      break;
+    case 'v':
+      verbose = atoi(optarg);
+      break;
+    case 'q':
+      quiet = 1;
       break;
     }
   }
 
   if (device == NULL) device = DEFAULT_DEVICE;
+
   bind2node(bind_core);
 
-  if (out_pcap_file != NULL)
-    dumper = pcap_dump_open(pcap_open_dead(DLT_EN10MB, 16384 /* MTU */), out_pcap_file);
+  if ((stats = calloc(1, sizeof(struct app_stats))) == NULL)
+    return -1;
 
   promisc = 1;
 
+  flags |= PF_RING_FLOW_OFFLOAD;
   if (promisc) flags |= PF_RING_PROMISC;
+  if (!periodic_updates) flags |= PF_RING_FLOW_OFFLOAD_NOUPDATES;
 
   pd = pfring_open(device, snaplen, flags);
 
@@ -234,6 +425,13 @@ int main(int argc, char* argv[]) {
   signal(SIGINT, sigproc);
   signal(SIGTERM, sigproc);
 
+  startTime.tv_sec = 0;
+
+  if(!verbose && !quiet) {
+    signal(SIGALRM, my_sigalarm);
+    alarm(ALARM_SLEEP);
+  }
+
  if (pfring_enable_ring(pd) != 0) {
     printf("Unable to enable ring :-(\n");
     pfring_close(pd);
@@ -243,14 +441,11 @@ int main(int argc, char* argv[]) {
   if (bind_core >= 0)
     bind2core(bind_core);
 
-  pfring_loop(pd, processBuffer, (u_char*)NULL, wait_for_packet);
+  packet_consumer();
 
   sleep(1);
 
   pfring_close(pd);
-
-  if (dumper != NULL) 
-    pcap_dump_close(dumper);
 
   return 0;
 }

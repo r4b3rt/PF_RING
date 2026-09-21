@@ -1,6 +1,6 @@
 /*
  *
- * (C) 2005-22 - ntop.org
+ * (C) 2005-26 - ntop
  *
  *
  * This program is free software; you can redistribute it and/or modify
@@ -12,14 +12,17 @@
  */
 
 #include "pfring.h"
-#include "pfring_mod_sysdig.h"
 #include "pfring_utils.h"
 
+#include <stdarg.h>
 #include <dlfcn.h> /* dlXXXX (e.g. dlopen()) */
 #include <linux/if.h>
 #ifdef ENABLE_HW_TIMESTAMP
 #include <linux/net_tstamp.h>
 #endif
+
+#include <sys/ioctl.h>
+#include <linux/ethtool.h>
 
 /* ******************************* */
 
@@ -225,8 +228,11 @@ static int __pfring_parse_tunneled_pkt(u_char *data, struct pfring_pkthdr *hdr, 
 int pfring_parse_pkt(u_char *data, struct pfring_pkthdr *hdr, u_int8_t level /* L2..L4, 5 (tunnel) */,
 		     u_int8_t add_timestamp /* 0,1 */, u_int8_t add_hash /* 0,1 */) {
   struct ethhdr *eh = (struct ethhdr*) data;
-  u_int32_t data_len = hdr->caplen, displ = 0, ip_len;
-  u_int16_t analyzed = 0, fragment_offset = 0;
+  u_int32_t data_len = hdr->caplen;
+  u_int32_t displ = sizeof(struct ethhdr);
+  u_int32_t ip_len;
+  u_int16_t analyzed = 0;
+  u_int16_t fragment_offset = 0;
 
   hdr->extended_hdr.parsed_pkt.tunnel.tunnel_id = NO_TUNNEL_ID;
 
@@ -245,13 +251,19 @@ int pfring_parse_pkt(u_char *data, struct pfring_pkthdr *hdr, u_int8_t level /* 
   hdr->extended_hdr.parsed_pkt.offset.vlan_offset = 0;
   hdr->extended_hdr.parsed_pkt.vlan_id = 0; /* Any VLAN */
 
+  if (hdr->extended_hdr.parsed_pkt.eth_type == 0xd28b /* Arista 7280 */) {
+    struct ethhdr *dummy_eh = (struct ethhdr *) &data[sizeof(struct ethhdr)];
+    displ += 14;
+    hdr->extended_hdr.parsed_pkt.eth_type = ntohs(dummy_eh->h_proto);
+  }
+
 #ifndef VLAN_VID_MASK
 #define VLAN_VID_MASK 0x0fff
 #endif
 
   if (hdr->extended_hdr.parsed_pkt.eth_type == 0x8100 /* 802.1q (VLAN) */) {
     struct eth_vlan_hdr *vh;
-    hdr->extended_hdr.parsed_pkt.offset.vlan_offset = sizeof(struct ethhdr);
+    hdr->extended_hdr.parsed_pkt.offset.vlan_offset = displ;
     vh = (struct eth_vlan_hdr *) &data[hdr->extended_hdr.parsed_pkt.offset.vlan_offset];
     hdr->extended_hdr.parsed_pkt.vlan_id = ntohs(vh->h_vlan_id) & VLAN_VID_MASK /* 0x0fff */;
     hdr->extended_hdr.parsed_pkt.eth_type = ntohs(vh->h_proto);
@@ -271,7 +283,7 @@ int pfring_parse_pkt(u_char *data, struct pfring_pkthdr *hdr, u_int8_t level /* 
     }
   }
 
-  hdr->extended_hdr.parsed_pkt.offset.l3_offset = hdr->extended_hdr.parsed_pkt.offset.eth_offset + displ + sizeof(struct ethhdr);
+  hdr->extended_hdr.parsed_pkt.offset.l3_offset = hdr->extended_hdr.parsed_pkt.offset.eth_offset + displ;
 
  L3:
 
@@ -447,20 +459,19 @@ int pfring_parse_pkt(u_char *data, struct pfring_pkthdr *hdr, u_int8_t level /* 
   } else if(hdr->extended_hdr.parsed_pkt.l3_proto == IPPROTO_GRE /* 0x47 */) {
     struct gre_header *gre = (struct gre_header*)(&data[hdr->extended_hdr.parsed_pkt.offset.l4_offset]);
     int gre_offset;
-
-    gre->flags_and_version = ntohs(gre->flags_and_version);
-    gre->proto = ntohs(gre->proto);
+    u_int16_t gre_flags_and_version = ntohs(gre->flags_and_version);
+    u_int16_t gre_proto = ntohs(gre->proto);
 
     gre_offset = sizeof(struct gre_header);
 
-    if((gre->flags_and_version & GRE_HEADER_VERSION) == 0) {
-      if(gre->flags_and_version & (GRE_HEADER_CHECKSUM | GRE_HEADER_ROUTING)) gre_offset += 4;
-      if(gre->flags_and_version & GRE_HEADER_KEY) {
+    if((gre_flags_and_version & GRE_HEADER_VERSION) == 0) {
+      if(gre_flags_and_version & (GRE_HEADER_CHECKSUM | GRE_HEADER_ROUTING)) gre_offset += 4;
+      if(gre_flags_and_version & GRE_HEADER_KEY) {
         u_int32_t *tunnel_id = (u_int32_t*)(&data[hdr->extended_hdr.parsed_pkt.offset.l4_offset+gre_offset]);
         gre_offset += 4;
 	hdr->extended_hdr.parsed_pkt.tunnel.tunnel_id = ntohl(*tunnel_id);
       }
-      if(gre->flags_and_version & GRE_HEADER_SEQ_NUM)  gre_offset += 4;
+      if(gre_flags_and_version & GRE_HEADER_SEQ_NUM)  gre_offset += 4;
 
       hdr->extended_hdr.parsed_pkt.offset.payload_offset = hdr->extended_hdr.parsed_pkt.offset.l4_offset + gre_offset;
 
@@ -469,8 +480,8 @@ int pfring_parse_pkt(u_char *data, struct pfring_pkthdr *hdr, u_int8_t level /* 
       if (level < 5)
         goto TIMESTAMP;
 
-      if (gre->proto == ETH_P_IP /* IPv4 */ || gre->proto == ETH_P_IPV6 /* IPv6 */)
-        analyzed += __pfring_parse_tunneled_pkt(data, hdr, gre->proto == ETH_P_IP ? 4 : 6, hdr->extended_hdr.parsed_pkt.offset.payload_offset);
+      if (gre_proto == ETH_P_IP /* IPv4 */ || gre_proto == ETH_P_IPV6 /* IPv6 */)
+        analyzed += __pfring_parse_tunneled_pkt(data, hdr, gre_proto == ETH_P_IP ? 4 : 6, hdr->extended_hdr.parsed_pkt.offset.payload_offset);
 
     } else { /* TODO handle other GRE versions */
       hdr->extended_hdr.parsed_pkt.offset.payload_offset = hdr->extended_hdr.parsed_pkt.offset.l4_offset;
@@ -505,6 +516,27 @@ TIMESTAMP:
     hdr->extended_hdr.pkt_hash = pfring_hash_pkt(hdr);
 
   return analyzed;
+}
+
+/* ****************************************************** */
+
+/* Safe implementation of snprintf which returns the number of bytes *actually* written */
+static void __pfring_snprintf(char *buff, u_int buff_len, int *buff_used, const char *fmt, ...) {
+  va_list args;
+  int ret;
+
+  if (*buff_used >= buff_len)
+    return;
+
+  va_start(args, fmt);
+  ret = vsnprintf(&buff[*buff_used], buff_len - *buff_used, fmt, args);
+  va_end(args);
+
+  if (ret > 0) {
+    *buff_used += ret;
+    if (*buff_used >= buff_len)
+      *buff_used = buff_len - 1;
+  }
 }
 
 /* ****************************************************** */
@@ -610,97 +642,97 @@ int pfring_print_parsed_pkt(char *buff, u_int buff_len, const u_char *p, const s
   char buf1[32], buf2[32];
   int buff_used = 0;
 
-  buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+  __pfring_snprintf(buff, buff_len, &buff_used,
     "[%s -> %s] ",
     etheraddr2string(h->extended_hdr.parsed_pkt.smac, buf1),
     etheraddr2string(h->extended_hdr.parsed_pkt.dmac, buf2));
 
   if (h->extended_hdr.parsed_pkt.offset.vlan_offset) {
-    buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+    __pfring_snprintf(buff, buff_len, &buff_used,
       "[vlan %u] ", h->extended_hdr.parsed_pkt.vlan_id);
     if (h->extended_hdr.parsed_pkt.qinq_vlan_id)
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "[QinQ-vlan %u] ", h->extended_hdr.parsed_pkt.qinq_vlan_id);
   }
 
   if (h->extended_hdr.parsed_pkt.eth_type == 0x0800 /* IPv4*/ || h->extended_hdr.parsed_pkt.eth_type == 0x86DD /* IPv6*/) {
 
     if(h->extended_hdr.parsed_pkt.eth_type == 0x0800 /* IPv4*/ ) {
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "[IPv4][%s:%d ", intoa(h->extended_hdr.parsed_pkt.ipv4_src), h->extended_hdr.parsed_pkt.l4_src_port);
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "-> %s:%d] ", intoa(h->extended_hdr.parsed_pkt.ipv4_dst), h->extended_hdr.parsed_pkt.l4_dst_port);
     } else {
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "[IPv6][%s:%d ",    in6toa(h->extended_hdr.parsed_pkt.ipv6_src), h->extended_hdr.parsed_pkt.l4_src_port);
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "-> %s:%d] ", in6toa(h->extended_hdr.parsed_pkt.ipv6_dst), h->extended_hdr.parsed_pkt.l4_dst_port);
     }
 
-    buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+    __pfring_snprintf(buff, buff_len, &buff_used,
       "[l3_proto=%s]", proto2str(h->extended_hdr.parsed_pkt.l3_proto));
 
     if(h->extended_hdr.parsed_pkt.tunnel.tunnel_id != NO_TUNNEL_ID) {
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "[TEID=0x%08X][tunneled_proto=%s]",
         h->extended_hdr.parsed_pkt.tunnel.tunnel_id,
         proto2str(h->extended_hdr.parsed_pkt.tunnel.tunneled_proto));
 
       if(h->extended_hdr.parsed_pkt.eth_type == 0x0800 /* IPv4*/ ) {
-        buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+        __pfring_snprintf(buff, buff_len, &buff_used,
 	  "[IPv4][%s:%d ",
           intoa(h->extended_hdr.parsed_pkt.tunnel.tunneled_ip_src.v4),
           h->extended_hdr.parsed_pkt.tunnel.tunneled_l4_src_port);
-        buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+        __pfring_snprintf(buff, buff_len, &buff_used,
 	  "-> %s:%d] ",
           intoa(h->extended_hdr.parsed_pkt.tunnel.tunneled_ip_dst.v4),
           h->extended_hdr.parsed_pkt.tunnel.tunneled_l4_dst_port);
       } else {
-        buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+        __pfring_snprintf(buff, buff_len, &buff_used,
 	  "[IPv6][%s:%d ",
           in6toa(h->extended_hdr.parsed_pkt.tunnel.tunneled_ip_src.v6),
           h->extended_hdr.parsed_pkt.tunnel.tunneled_l4_src_port);
-        buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+        __pfring_snprintf(buff, buff_len, &buff_used,
 	  "-> %s:%d] ",
           in6toa(h->extended_hdr.parsed_pkt.tunnel.tunneled_ip_dst.v6),
           h->extended_hdr.parsed_pkt.tunnel.tunneled_l4_dst_port);
       }
     }
 
-    buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+    __pfring_snprintf(buff, buff_len, &buff_used,
       "[hash=%u]",
       h->extended_hdr.pkt_hash);
 
     if (h->extended_hdr.parsed_pkt.l3_proto == IPPROTO_TCP)
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "[tos=%d][tcp_seq_num=%u]",
         h->extended_hdr.parsed_pkt.ipv4_tos,
         h->extended_hdr.parsed_pkt.tcp.seq_num);
 
   } else if(h->extended_hdr.parsed_pkt.eth_type == 0x0806 /* ARP */) {
-    buff_used += snprintf(&buff[buff_used], buff_len - buff_used, "[ARP]");
+    __pfring_snprintf(buff, buff_len, &buff_used, "[ARP]");
     if (buff_len >= h->extended_hdr.parsed_pkt.offset.l3_offset+30) {
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "[Sender=%s/%s]",
         etheraddr2string(&p[h->extended_hdr.parsed_pkt.offset.l3_offset+8], buf1),
         intoa(ntohl(*((u_int32_t *) &p[h->extended_hdr.parsed_pkt.offset.l3_offset+14]))));
-      buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+      __pfring_snprintf(buff, buff_len, &buff_used,
         "[Target=%s/%s]",
         etheraddr2string(&p[h->extended_hdr.parsed_pkt.offset.l3_offset+18], buf2),
         intoa(ntohl(*((u_int32_t *) &p[h->extended_hdr.parsed_pkt.offset.l3_offset+24]))));
     }
 
   } else if(h->extended_hdr.parsed_pkt.eth_type == 0x0027 /* STP */) {
-    buff_used += snprintf(&buff[buff_used], buff_len - buff_used, "[STP]");
+    __pfring_snprintf(buff, buff_len, &buff_used, "[STP]");
 
   } else {
-    buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
+    __pfring_snprintf(buff, buff_len, &buff_used,
       "[eth_type=0x%04X]", h->extended_hdr.parsed_pkt.eth_type);
   }
 
-  buff_used += snprintf(&buff[buff_used], buff_len - buff_used,
-    " [caplen=%d][len=%d][eth_offset=%d][l3_offset=%d][l4_offset=%d][payload_offset=%d]\n",
-    h->caplen, h->len, 
+  __pfring_snprintf(buff, buff_len, &buff_used,
+    " [caplen=%d][len=%d][eth_offset=%d][l3_offset=%d][l4_offset=%d][payload_offset=%d]",
+    h->caplen, h->len,
     h->extended_hdr.parsed_pkt.offset.eth_offset,
     h->extended_hdr.parsed_pkt.offset.l3_offset,
     h->extended_hdr.parsed_pkt.offset.l4_offset,
@@ -848,7 +880,7 @@ int pfring_get_mtu_size(pfring* ring) {
 
 /* *************************************** */
 
-int pfring_parse_bpf_filter(char *filter_buffer, u_int caplen,
+int pfring_parse_bpf_filter(const char *filter_buffer, u_int caplen,
 #ifdef BPF_RELEASE
                             struct bpf_program
 #else
@@ -951,3 +983,76 @@ void pfring_thirdparty_lib_init(const char* thirdparty_lib_name, struct thirdpar
   /* Don't dlclose(thirdparty_handle) as otherwise symbols will disappead */
 }
 
+/* *************************************** */
+
+#ifndef SPEED_UNKNOWN
+#define SPEED_UNKNOWN		-1
+#endif
+
+u_int32_t pfring_get_ethtool_link_speed(const char *ifname) {
+  int sock, rc;
+  struct ifreq ifr;
+  struct ethtool_cmd edata;
+  u_int32_t speed = 0;
+  const char *col;
+#ifdef USE_ETHTOOL_GLINKSETTINGS
+  struct {
+    struct ethtool_link_settings edata;
+    uint32_t link_mode_data[3 *	ETHTOOL_LINK_MODE_MASK_MAX_KERNEL_NU32];
+  } ecmd;
+#endif
+
+  col = strchr(ifname, ':');
+
+  if (col != NULL)
+    ifname = &col[1];
+
+  sock = socket(PF_INET, SOCK_DGRAM, 0 /* IPPROTO_IP */);
+
+  if (sock < 0) {
+    fprintf(stderr, "Socket error [%s]\n", ifname);
+    return speed;
+  }
+
+  memset(&ifr, 0, sizeof(struct ifreq));
+  strncpy(ifr.ifr_name, ifname, IFNAMSIZ-1);
+
+#ifdef USE_ETHTOOL_GLINKSETTINGS
+  /* Try with ETHTOOL_GLINKSETTINGS first */
+
+  memset(&ecmd, 0, sizeof(ecmd));
+  ecmd.edata.cmd = ETHTOOL_GLINKSETTINGS;
+  ifr.ifr_data = (void *) &ecmd;
+	
+  rc = ioctl(sock, SIOCETHTOOL, &ifr);
+
+  if (rc == 0) {
+
+    speed = ecmd.edata.speed;
+
+  } else 
+#endif
+  {
+
+    /* Try with ETHTOOL_GSET */
+
+    memset(&edata, 0, sizeof(struct ethtool_cmd));
+    edata.cmd = ETHTOOL_GSET;
+    ifr.ifr_data = (char *) &edata;
+
+    rc = ioctl(sock, SIOCETHTOOL, &ifr);
+
+    if (rc == 0)
+      speed = ethtool_cmd_speed(&edata);
+    //else fprintf(stderr, "error reading link speed on %s\n", ifname);
+  }  
+
+  close(sock);
+
+  if (speed == SPEED_UNKNOWN)
+    speed = 0;
+
+  return speed;
+}
+
+/* *************************************** */

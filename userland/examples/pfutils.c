@@ -1,5 +1,5 @@
 /*
- * (C) 2003-20 - ntop 
+ * (C) 2003-26 - ntop 
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -42,6 +42,8 @@
 #define ETH_ALEN 6
 #endif
 
+#include "pfring.h"
+
 #ifdef HAVE_PF_RING_ZC
 #include "pfring_zc.h"
 #endif
@@ -50,13 +52,16 @@
 
 #define POW2(n) ((n & (n - 1)) == 0)
 
-#define MAX_PACKET_SIZE 16018
+/* Max MTU is 16K on Ethernet, 64K on loopback */
+//#define MAX_PACKET_SIZE 16018
+#define MAX_PACKET_SIZE 65535
 
 struct packet {
   u_int32_t id;
   u_int16_t len;
   u_int64_t ticks_from_beginning;
   u_char *pkt;
+  u_int8_t iface_index; /* In case of multisend */
   struct packet *next;
 };
 
@@ -81,9 +86,9 @@ struct compact_ip_hdr {
 };
 
 struct compact_ipv6_hdr {
-  u_int32_t		flow_lbl:24,
-  			priority:4,
-			version:4;
+  u_int8_t		priority:4,
+  			version:4;
+  u_int8_t		flow_lbl[3];
   u_int16_t		payload_len;
   u_int8_t		nexthdr;
   u_int8_t		hop_limit;
@@ -133,6 +138,8 @@ static u_int32_t wrapsum (u_int32_t sum) {
 
 static int compute_csum = 1;
 static int num_ips = 1;
+static int num_ports = 1;
+static int balance_source_ips = 1;
 
 static u_char matrix_buffer[
   sizeof(struct ether_header) + 
@@ -146,16 +153,27 @@ static void forge_udp_packet_fast(u_char *buffer, u_int packet_len, u_int idx) {
   struct compact_udp_hdr *udp_header;
   u_int32_t src_ip = 0x0A000000; /* 10.0.0.0 */ 
   u_int32_t dst_ip =  0xC0A80001; /* 192.168.0.1 */
+  u_int32_t base_ip;
   u_int16_t src_port = 2012, dst_port = 3000;
 
+  if (balance_source_ips)
+    base_ip = src_ip;
+  else
+    base_ip = dst_ip;
+
   if (num_ips == 0) {
-    src_ip |= idx & 0xFFFFFF;
+    base_ip |= idx & 0xFFFFFF;
   } else if (num_ips > 1) {
     if (POW2(num_ips))
-      src_ip |= idx & (num_ips - 1) & 0xFFFFFF;
+      base_ip |= idx & (num_ips - 1) & 0xFFFFFF;
     else
-      src_ip |= (idx % num_ips) & 0xFFFFFF;
+      base_ip |= (idx % num_ips) & 0xFFFFFF;
   }
+
+  if (balance_source_ips)
+    src_ip = base_ip;
+  else
+    dst_ip = base_ip;
 
 #if 0
   memset(buffer, 0, packet_len + 4);
@@ -217,6 +235,7 @@ static int num_vlan = 1;
 static int forge_payload = 0;
 static char srcmac[6] = { 0 }, dstmac[6] = { 0 };
 static struct in_addr srcaddr = { 0 }, dstaddr = { 0 };
+static char packet_content = 0;
 
 static void forge_udp_packet(u_char *buffer, u_int buffer_len, u_int idx, u_int ip_version) {
   struct eth_vlan_hdr *vlan;
@@ -227,7 +246,7 @@ static void forge_udp_packet(u_char *buffer, u_int buffer_len, u_int idx, u_int 
   int l2_len, ip_len, addr_len, i, payload_off;
 
   /* Reset packet */
-  memset(buffer, 0, buffer_len);
+  memset(buffer, packet_content, buffer_len);
 
   l2_len = sizeof(struct ether_header);
 
@@ -262,6 +281,7 @@ static void forge_udp_packet(u_char *buffer, u_int buffer_len, u_int idx, u_int 
     addr = (u_char *) ip6->saddr;
     addr_len = sizeof(ip6->saddr);
     payload_off = l2_len + sizeof(struct compact_ipv6_hdr);
+
   } else {
     buffer[l2_len-2] = 0x08, buffer[l2_len-1] = 0x00;
     ip = (struct compact_ip_hdr *) &buffer[l2_len];
@@ -274,8 +294,17 @@ static void forge_udp_packet(u_char *buffer, u_int buffer_len, u_int idx, u_int 
     ip->ttl = 64;
     ip->frag_off = htons(0);
     ip->protocol = IPPROTO_UDP;
-    ip->daddr = dstaddr.s_addr;
-    ip->saddr = htonl((ntohl(srcaddr.s_addr) + ip_offset + (idx % num_ips)) & 0xFFFFFFFF);
+
+    if (balance_source_ips)
+      ip->daddr = dstaddr.s_addr;
+    else
+      ip->daddr = htonl((ntohl(dstaddr.s_addr) + ip_offset + (idx % num_ips)) & 0xFFFFFFFF);
+
+    if (balance_source_ips)
+      ip->saddr = htonl((ntohl(srcaddr.s_addr) + ip_offset + (idx % num_ips)) & 0xFFFFFFFF);
+    else
+      ip->saddr = srcaddr.s_addr;
+
     ip->check = wrapsum(in_cksum((unsigned char *) ip, ip_len, 0));
     addr = (u_char *) &ip->saddr;
     addr_len = sizeof(ip->saddr);
@@ -283,7 +312,7 @@ static void forge_udp_packet(u_char *buffer, u_int buffer_len, u_int idx, u_int 
   }
 
   udp = (struct compact_udp_hdr *)(buffer + l2_len + ip_len);
-  udp->sport = htons(2012 + (idx / num_ips));
+  udp->sport = htons(2012 + ((num_ports > 1) ? (idx / num_ips) : 0));
   udp->dport = htons(3000);
   udp->len = htons(buffer_len - l2_len - ip_len);
   udp->check = 0; /* It must be 0 to compute the checksum */

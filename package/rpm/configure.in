@@ -2,7 +2,7 @@ AC_INIT([Makefile.in], 1.0)
 
 VERS=`../version.sh --release`
 MAJOR_VERS=`../version.sh --major`
-PLATFORM=`uname -p`
+PLATFORM=`uname -m`
 
 LIBPCAP_VERS=`../version.sh --libpcap-version`
 
@@ -46,9 +46,7 @@ if test "$CENTOS_RELEASE" -ne 6; then
 fi
 
 MAKE_SNORT=""
-if test "$CENTOS_RELEASE" -ne 8; then
-  MAKE_SNORT="make snort"
-fi
+dnl>MAKE_SNORT="make snort"
 
 RPM_SIGN_CMD="rpm --addsign"
 if test "$CENTOS_RELEASE" -ne 8; then

@@ -1,5 +1,5 @@
 /*
- * (C) 2018-22 - ntop
+ * (C) 2018-26 - ntop
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -48,19 +48,24 @@
 
 #include "ftutils.c"
 
+// #define TEST_CALLBACK_NEW_FLOW
+// #define TEST_CALLBACK_L7_DETECTED
+// #define TEST_CALLBACK_FLOW_PACKET
+
 #define ALARM_SLEEP 1
 #define DEFAULT_DEVICE "eth0"
 
 #ifdef HAVE_NDPI
 #define PRINT_NDPI_INFO /* Note: this requires linking the nDPI library */
 #include "ndpi_api.h"
+//#define CUSTOM_NDPI
 #endif
 
 pfring *pd = NULL;
 pfring_ft_table *ft = NULL;
 int bind_core = -1;
 int bind_time_pulse_core = -1;
-u_int8_t quiet = 0, verbose = 0, stats_only = 0;
+u_int8_t quiet = 0, verbose = 0, stats_only = 0, log_time = 1;
 u_int8_t time_pulse = 0, enable_l7 = 0, do_shutdown = 0;
 u_int64_t num_pkts = 0, num_bytes = 0, num_flows = 0;
 #ifdef PRINT_NDPI_INFO
@@ -174,25 +179,27 @@ void my_sigalarm(int sig) {
 
 /* ******************************** */
 
-/* This callback is called after a packet has been processed
+#ifdef TEST_CALLBACK_FLOW_PACKET
+/* This callback is called after a packet has been processed */
 void processFlowPacket(const u_char *data, pfring_ft_packet_metadata *metadata,
 		       pfring_ft_flow *flow, void *user) {
-  //fprintf(stderr, "Processing packet [payloadLen: %u]\n", metadata->payload_len);
+  // fprintf(stderr, "Processing packet [payloadLen: %u]\n", metadata->payload_len);
 
   // Marking the flow to discard all packets (this can be used to implement custom filtering policies)
   // pfring_ft_flow_set_action(flow, PFRING_FT_ACTION_DISCARD);
 }
-*/
+#endif
 
-/* ******************************** */
+/* ****************************************************** */
 
 const char *action_to_string(pfring_ft_action action) {
   switch (action) {
     case PFRING_FT_ACTION_FORWARD: return "forward";
     case PFRING_FT_ACTION_DISCARD: return "discard";
     case PFRING_FT_ACTION_DEFAULT: return "default";
-    case PFRING_FT_ACTION_USER_1:  return "user1";
-    case PFRING_FT_ACTION_USER_2:  return "user2";
+    case PFRING_FT_ACTION_USER_1:  return "user_1";
+    case PFRING_FT_ACTION_USER_2:  return "user_2";
+    case PFRING_FT_ACTION_SLICE:   return "slice";
   }
   return "";
 }
@@ -214,6 +221,16 @@ const char *status_to_string(pfring_ft_flow_status status) {
 
 /* ******************************** */
 
+void print_time() {
+  time_t now = time(NULL);
+  struct tm* tm_info = localtime(&now);
+  char time_buff[26];
+  strftime(time_buff, sizeof(time_buff), "%H:%M:%S", tm_info);
+  printf("%s ", time_buff);
+}
+
+/* ******************************** */
+
 /* This callback is called when a flow expires */
 void processFlow(pfring_ft_flow *flow, void *user){
   pfring_ft_flow_key *k;
@@ -231,6 +248,9 @@ void processFlow(pfring_ft_flow *flow, void *user){
     ip1 = (char *) inet_ntop(AF_INET6, &k->saddr.v6, buf1, sizeof(buf1));
     ip2 = (char *) inet_ntop(AF_INET6, &k->daddr.v6, buf2, sizeof(buf2));
   }
+
+  if (log_time)
+    print_time();
 
   printf("[Flow] ");
 
@@ -254,7 +274,7 @@ void processFlow(pfring_ft_flow *flow, void *user){
          action_to_string(pfring_ft_flow_get_action(flow)));
 
   switch(v->l7_protocol.master_protocol) {
-    case 5:
+    case 5: /* DNS */
       if (v->l7_metadata.dns.query != NULL)
         printf(", query: %s", v->l7_metadata.dns.query);
       printf(", queryType: %u, replyCode: %u",
@@ -262,7 +282,7 @@ void processFlow(pfring_ft_flow *flow, void *user){
         v->l7_metadata.dns.replyCode);
       break;
 
-    case 7:
+    case 7: /* HTTP */
       if (v->l7_metadata.http.serverName != NULL)
         printf(", hostName: %s", v->l7_metadata.http.serverName);
       if (v->l7_metadata.http.url != NULL)
@@ -271,16 +291,14 @@ void processFlow(pfring_ft_flow *flow, void *user){
         printf(", responseCode: %u", v->l7_metadata.http.responseCode);
       break;
 
-    case 91:
+    case 91: /* TLS */
       if (v->l7_metadata.tls.serverName != NULL)
         printf(", hostName: %s", v->l7_metadata.tls.serverName);
 #ifdef PRINT_NDPI_INFO
       if (enable_l7_extra) {
         struct ndpi_flow_struct *ndpi_flow = pfring_ft_flow_get_ndpi_handle(flow);
-        if (ndpi_flow->protos.tls_quic_stun.tls_quic.ja3_server[0] != '\0')
-          printf(", ja3s: '%s'", ndpi_flow->protos.tls_quic_stun.tls_quic.ja3_server);
-        if (ndpi_flow->protos.tls_quic_stun.tls_quic.ja3_client[0] != '\0')
-          printf(", ja3c: '%s'", ndpi_flow->protos.tls_quic_stun.tls_quic.ja3_client);
+        if (ndpi_flow->protos.tls_quic.ja4_client[0])
+          printf(", ja4c: '%s'", ndpi_flow->protos.tls_quic.ja4_client);
       }
 #endif
       break;
@@ -295,9 +313,41 @@ void processFlow(pfring_ft_flow *flow, void *user){
 
 /* ******************************** */
 
+#ifdef TEST_CALLBACK_NEW_FLOW
+/* This callback is called when a new flow is created */
+void processNewFlow(pfring_ft_flow *flow, void *user){
+
+  if (log_time)
+    print_time();
+
+  printf("[New Flow]\n");
+}
+#endif
+
+/* ******************************** */
+
+#ifdef TEST_CALLBACK_L7_DETECTED
+void l7Detected(const u_char *data, pfring_ft_packet_metadata *metadata, pfring_ft_flow *flow, void *user) {
+  pfring_ft_flow_value *v;
+  char buf[32];
+
+  if (enable_l7) {
+    v = pfring_ft_flow_get_value(flow);
+
+    if (log_time)
+      print_time();
+
+    printf("[Detected] l7: %s, category: %u, tunnelType: %u\n",
+	   pfring_ft_l7_protocol_name(ft, &v->l7_protocol, buf, sizeof(buf)), v->l7_protocol.category, v->tunnel_type);
+  }
+}
+#endif
+
+/* ******************************** */
+
 void process_packet(const struct pfring_pkthdr *h, const u_char *p, const u_char *user_bytes) {
   pfring_ft_pcap_pkthdr *hdr = (pfring_ft_pcap_pkthdr *) h;
-  pfring_ft_ext_pkthdr ext_hdr;
+  pfring_ft_ext_pkthdr ext_hdr = { 0 };
   u_int64_t ts;
   pfring_ft_action action;
 
@@ -318,6 +368,8 @@ void process_packet(const struct pfring_pkthdr *h, const u_char *p, const u_char
     char buffer[256];
     buffer[0] = '\0';
     pfring_print_pkt(buffer, sizeof(buffer), p, h->len, h->caplen);
+    if (log_time)
+      print_time();
     printf("[Packet]%s %s", action == PFRING_FT_ACTION_DISCARD ? " [discard]" : "", buffer);
   }
 }
@@ -351,7 +403,7 @@ void print_version(void) {
   pfring_ft_version(version);
  
   printf("PF_RING FT v.%s\n" 
-         "Copyright 2018-22 ntop.org\n",
+         "Copyright 2018-26 ntop\n",
          version);
       
   rc = pfring_ft_license(system_id, &license_expiration, &maintenance_expiration);
@@ -381,11 +433,12 @@ void print_version(void) {
 /* *************************************** */
 
 void print_help(void) {
-  printf("ftflow - (C) 2018-22 ntop.org\n");
+  printf("ftflow - (C) 2018-26 ntop\n");
   printf("Flow processing based on PF_RING FT (Flow Table)\n\n");
   printf("-h              Print this help\n");
   printf("-i <device>     Device name\n");
   printf("-7              Enable L7 protocol detection (nDPI)\n");
+  printf("-f <bpf>        Capture filter (BPF)\n");
   printf("-F <file>       Load filtering/shunting rules from file\n");
   printf("-p <file>       Load nDPI custom protocols from file\n");
   printf("-c <file>       Load nDPI categories by host from file\n");
@@ -418,8 +471,13 @@ int main(int argc, char* argv[]) {
   packet_direction direction = rx_and_tx_direction;
   pthread_t time_thread;
   u_int8_t ignore_hw_hash = 0;
+  char *filter = NULL;
+#ifdef CUSTOM_NDPI
+  struct ndpi_detection_module_struct *ndpi_mod;
+  NDPI_PROTOCOL_BITMASK all;
+#endif
 
-  while ((c = getopt(argc,argv,"c:dEg:hHi:p:qvF:s:S:tV7")) != '?') {
+  while ((c = getopt(argc,argv,"c:dEf:g:hHi:p:qvF:s:S:tV7")) != '?') {
     if ((c == 255) || (c == -1)) break;
 
     switch(c) {
@@ -436,6 +494,9 @@ int main(int argc, char* argv[]) {
       enable_l7_extra = 1;
       break;
 #endif
+    case 'f':
+      filter = strdup(optarg);
+      break;
     case 'g':
       bind_core = atoi(optarg);
       break;
@@ -486,12 +547,14 @@ int main(int argc, char* argv[]) {
   if (device == NULL) device = DEFAULT_DEVICE;
   bind2node(bind_core);
 
+#ifndef CUSTOM_NDPI
   if (enable_l7)
     ft_flags |= PFRING_FT_TABLE_FLAGS_DPI;
 
 #ifdef PRINT_NDPI_INFO
   if (enable_l7_extra)
     ft_flags |= PFRING_FT_TABLE_FLAGS_DPI_EXTRA;
+#endif
 #endif
 
   if (ignore_hw_hash)
@@ -503,6 +566,18 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "pfring_ft_create_table error\n");
     return -1;
   }
+
+#ifdef CUSTOM_NDPI
+  if (enable_l7) {
+    ndpi_mod = ndpi_init_detection_module(NULL);
+    ndpi_set_config(ndpi_mod, NULL, "dpi.guess_on_giveup", "0");
+    NDPI_BITMASK_SET_ALL(all);
+    ndpi_set_protocol_detection_bitmask2(ndpi_mod, &all);
+    ndpi_finalize_initialization(ndpi_mod);
+
+    pfring_ft_set_ndpi_handle(ft, ndpi_mod);
+  }
+#endif
 
   if (slice_duration > 0)
     pfring_ft_flow_set_flow_slicing(ft, slice_duration);
@@ -521,9 +596,20 @@ int main(int argc, char* argv[]) {
   if (!stats_only)
     pfring_ft_set_flow_export_callback(ft, processFlow, NULL);
 
-  /* Example of callback for packets that have been successfully processed
+#ifdef TEST_CALLBACK_NEW_FLOW
+  /* Example of callback for new flows */
+  pfring_ft_set_new_flow_callback(ft, processNewFlow, NULL);
+#endif
+
+#ifdef TEST_CALLBACK_L7_DETECTED
+  /* Example of callback for L7 detected */
+  pfring_ft_set_l7_detected_callback(ft, l7Detected, NULL);
+#endif
+
+#ifdef TEST_CALLBACK_FLOW_PACKET
+  /* Example of callback for packets that have been successfully processed */
   pfring_ft_set_flow_packet_callback(ft, processFlowPacket, NULL);
-  */
+#endif
 
   if (protocols_file) {
     rc = pfring_ft_load_ndpi_protocols(ft, protocols_file);
@@ -555,7 +641,7 @@ int main(int argc, char* argv[]) {
 
   promisc = 1;
 
-  if (promisc)      flags |= PF_RING_PROMISC;
+  if (promisc)     flags |= PF_RING_PROMISC;
   if (!time_pulse) flags |= PF_RING_TIMESTAMP; /* needed for flow processing */
 
   pd = pfring_open(device, snaplen, flags);
@@ -582,6 +668,14 @@ int main(int argc, char* argv[]) {
 
   if ((rc = pfring_set_socket_mode(pd, recv_only_mode)) != 0)
     fprintf(stderr, "pfring_set_socket_mode returned [rc=%d]\n", rc);
+
+  if (filter != NULL) {
+    rc = pfring_set_bpf_filter(pd, filter);
+    if (rc != 0)
+      fprintf(stderr, "pfring_set_bpf_filter(%s) returned %d\n", filter, rc);
+    else if (!quiet)
+      printf("Successfully set BPF filter '%s'\n", filter);
+  }
 
   signal(SIGINT, sigproc);
   signal(SIGTERM, sigproc);
@@ -626,6 +720,11 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "%lu exported flows\n", num_flows);
 
   pfring_ft_destroy_table(ft);
+
+  if (categories_file)    { free(categories_file);    categories_file = NULL;    }
+  if (configuration_file) { free(configuration_file); configuration_file = NULL; }
+  if (device)             { free(device);             device = NULL;             }
+  if (protocols_file)     { free(protocols_file);     protocols_file = NULL;     }
 
   return 0;
 }

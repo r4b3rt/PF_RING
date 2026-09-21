@@ -1,6 +1,451 @@
 # CHANGELOG
 
 ---------------------------------------
+2026-08-26 PF_RING 9.4
+
+* PF_RING Library
+ - Add support for Linux alias interfaces
+ - Add PF_RING_IP_ONLY_RSS flag to pfring_open() to enable IP-based RSS (when supported by the adapter)
+ - Add support for multi-timeline extraction (n2disk dump sets) with timestamp-based data aggregation via nPCAP
+
+* PF_RING Kernel Module
+ - Fix packet_rcv being called multiple times with multiple namespaces
+ - Fix bond capture race condition
+ - Add per-interface packet counters printed under /proc
+ - Fix compilation on kernel >= 6.17
+ - Deprecate quick_mode
+
+* FT Library
+ - Add support for nDPI category filters
+ - Add PF_RING_ZC_IPONLY_RSS flag to enable IP-based RSS (when supported by the adapter)
+ - Add PFRING_FT_KEY_EXT_MAC flag to use the MAC address as part of the flow key
+ - Export unique_source_id in flow stats
+ - Fix IP-based protocol guess
+ - Fix flow stats metadata export
+
+* PF_RING Capture Modules and ZC Drivers
+ - NVIDIA (Mellanox) improvements
+   - Print Mellanox interface name when listing interfaces
+   - Fix segfault opening a non-existing interface
+ - Napatech improvements
+   - Fix serial number reporting on F3076x and F2070x
+ - Intel improvements
+   - New ice-zc driver v.2.5.4 (adds support for E835)
+   - Fix symmetric RSS configuration being reset on ice reload
+   - Change RSS hash function selection on ice according to rss_scheme, enable src MAC in L2 hash
+   - Unload intel_auxiliary before reloading the ice driver
+   - Fix i40e/ixgbe/igb compilation on RHEL 9.7
+   - Fix compilation on kernel 7.x (Ubuntu 26) and kernel < 7.x
+   - Remove e1000e from drivers bundle package (EOL)
+
+* Examples
+ - pfcount
+   - Print link state, improve output formatting
+ - pfcount_multichannel
+   - Add -x option to enable IP-only RSS hashing
+ - Fix preflect
+ - Fix ntopdump wireshark extcap
+ - Remove obsolete pfcount_82599 example
+
+* Misc
+ - Support for Ubuntu 26
+ - Add pfring_is_module_prefix() API
+ - Rework service start/stop sequencing in pfring/pfring-dkms postinst/prerm scripts
+ - Improve cluster service reliability (fix hanging service, avoid circular restart dependencies)
+
+---------------------------------------
+2025-11-17 PF_RING 9.2
+
+* PF_RING Library
+ - Fix fd leak in pfring_findalldevs
+ - Fix IPv6 decoding
+ - Define endianess macros compatible with kernel in userspace
+
+* PF_RING Kernel Module
+ - Enhanced namespace and container support
+ - Implement cluster type cluster_per_flow_ip_with_dup_tuple_ext
+ - Fix GRE parsing: do not modify packet content
+ - Reset packet_type struct
+ - Fix compilation on old kernels
+
+* ZC Library
+ - Add GTP-over-GRE support for zbalance GTP hash
+
+* FT Library
+ - nDPI API updates
+ - Fix CAPWAB decoding
+
+* PF_RING Capture Modules and ZC Drivers
+ - NVIDIA (Mellanox) ConnectX improvements
+   - Add support for non-promisc mode, both with single queue and RSS
+ - Napatech improvements
+   - Add PF_RING_FLOW_OFFLOAD_RESET flag to reset hardware flow table when using PF_RING_FLOW_OFFLOAD
+ - Intel improvements
+   - New ice-zc driver v.2.3.10
+     - Rework shutdown procedure to avoid crash on shutdown
+   - New igb-zc driver v.5.16.11
+   - Disable e1000e compilation on kernel 6.12 or later (EOL)
+   - Rename intel_igb_82580 to intel_igb_ts (includes i350/82580)
+   - Load ice before iavf to prevent initialization issues
+   - Fix VF configuration and driver auto-loading
+
+* Examples
+ - pfcount_multichannel
+   - Add -J option to disable promisc mode
+ - ftflow
+   - Update access to ndpi metadata
+ - New psend example
+
+* Misc
+ - Support for Debian 13
+ - Support for Linux kernel 6.12 and newer
+
+---------------------------------------
+2025-04-24 PF_RING 9.0
+
+* Key Features
+ - Consolidated Napatech Flow Manager support (now with periodic flow updates)
+ - Flow tracking on NVIDIA DOCA Flow CT (BlueField 3 and ConnectX 6/7)
+
+* PF_RING Library
+ - Add PF_RING_FLOW_UPDATE_CAUSE_PERIODIC to generic flow offload messages
+ - Add support for Arista 7280 timestamps
+ - Add ifindex to interface list returned by pfring_findalldevs()
+ - Add PF_RING_HW_TIMESTAMP_UNSYNC flag to avoid setting the hw clock using system time (e.g. when using PTP)
+
+* PF_RING Kernel Module
+ - Set interface name under /proc for non-kernel devices
+ - Add SO_GET_CLUSTER_OBJECT_INFO to read ZC queue status
+
+* ZC Library
+ - New API calls to check if a queue is locked and in use (pfring_zc_ipc_queue_in_use, pfring_zc_ipc_queue_in_use_from_cluster, pfring_zc_ipc_queue_in_use_from_queue)
+ - Add pfring_zc_get_num_rx_channels API (print number of device queue in zcount and zbalance_ipc)
+ - Implemented GTPv0 balancing in built-in hash
+ - Add PF_RING_ZC_DEVICE_HW_TIMESTAMP_UNSYNC flag to avoid setting the hw clock using system time (e.g. when using PTP)
+
+* FT Library
+ - Add PFRING_FT_TABLE_FLAGS_NO_GUESS flag to disable protocol guess
+ - Add PFRING_FT_IGNORE_VLAN to ignore VLAN in flow key
+ - Add action to pfring_ft_packet_metadata to be used in packet callbacks
+ - Fix flow slices export (duration)
+ - Fix shunting
+
+* PF_RING Capture Modules and ZC Drivers
+ - Napatech improvements
+   - Add support for periodic flow updates with the latest Flow Manager API
+   - Add support for NT_TIMESTAMP_TYPE_UNIX_NANOTIME
+   - Handle PF_RING_FLOW_OFFLOAD_NOUPDATES to disable periodic updates
+   - Fix flow ID (32-bit on API v2) on new Flow Manager API
+ - NVIDIA (Mellanox) ConnectX improvements
+   - RSS limit set to 64 queues
+   - Add PF_RING_RSS env var to set number of rss queues (rather then reading system conf)
+   - Fix BPF rules
+ - Intel improvements
+   - Add MAC/VLAN support in RSS
+   - Add rss_scheme parameter to select rss hash at driver load
+   - Add irdma kernel module - required by ice on some kernel version
+ - Update support for Silicom FPGA (Fiberblaze) adapters
+
+* Examples
+ - zbalance_ipc
+   - Fail on bad or unsupported BPF
+   - Add -0 option to disable RSS (all traffic to queue 0)
+ - pfcount 
+   - Add ifindex to interface list (printed with -L -v 1)
+   - Fix -L header
+ - zcount
+   - Add -U option to set PF_RING_ZC_DEVICE_HW_TIMESTAMP_UNSYNC
+ - ftflow
+   - Add -f <bpf> to ftflow. Update FT libs.
+   - Fix uninitialized memory and minor leaks
+ - ftflow_pcap
+   - Add -N option to disable L7 protocol guess
+ - pfflow_offload improvements for Napatech Flow Manager
+   - Add -u to enable periodic updates
+   - Print flow updates
+
+* Misc
+ - Add ARM support for PF_RING FT
+ - Add support for /etc/pf_ring/keepoffload (keep interfaces offloads enabled)
+ - Fix pf_ringctl script execution on Rocky9 and new RH systems based on systemd
+ - Fix compilation on RH9
+ - Deprecate apcon/vss timestamps
+
+---------------------------------------
+2024-08-05 PF_RING 8.8
+
+* Key Features
+ - Support for Napatech Flow Manager
+ - Support for NVIDIA BlueField 2/3
+
+* PF_RING Library
+ - Add pfring_flow_update struct and pfring_recv_flow
+ - Add PF_RING_FLOW_OFFLOAD flag to enable Flow Table offload on supported adapters
+ - Add PF_RING_FLOW_OFFLOAD_AUTO_UNLEARN to control tcp auto unlearn
+ - Add PF_RING_KEEP_CRC flag (required by Napatech)
+ - Fix pfring_zc_send_pkt_multi return code
+
+* PF_RING Kernel Module
+ - Add flow_id to generic_flow_tuple_hw_rule
+ - Fix crash with more than 64 rss queues
+ - Various minor fixes 
+
+* FT Library
+ - Add pfring_ft_zmq_get_stats API
+ - Add slice action
+
+* PF_RING Capture Modules and ZC Drivers
+ - Add support for Napatech Flow Manager (Flow Table offload)
+ - Add support for NVIDIA BlueField (ARM64)
+ - Add jumbo support for ice-zc
+ - Add support for Napatech zero-copy forwarding (pfring_send_last_rx_packet)
+ - Fix all Intel drivers compilation on latest kernels (including Ubuntu 24)
+   - ixgbevf-zc driver update v.4.18.9
+   - i40e-zc driver update v.2.24.6
+   - iavf-zc driver update v.4.9.5
+ - Extend Napatech interface name to support adapter ID
+ - Fix drop counter on NVIDIA/Mellanox Connect-X (read phy discards in addition to buffer discards)
+ - Fix crash with more than 64 rss queues
+ - Fix iavf (i40e VF) ring initialization
+ - Fix driver dependency intel_auxiliary
+ 
+* PF_RING-aware Libpcap/Tcpdump
+ - New pfring-aware tcpdump 4.99.4
+
+* Examples
+ - New pfflow_offload sample app with support for Napatech Flow Manager
+ - pfsend
+   - Fix ipv6 packet forging
+   - Add eth header when replaying RAW capture files
+   - Add -U / -K options to control flow distribution
+   - Fix on the fly packets generation
+   - Fix -A when -O is used
+ - pfsend_multichannel
+   - Add -C to support multiple TX channels with Napatech
+ - pfbridge
+   - Add support for Napatech zero-copy forwarding
+
+* Misc
+ - Improve pf_ringctl to auto generate hugepages.conf based on numa nodes
+ - Change MAX_CAPLEN to 65600 to correctly handle max jumbo packet size
+ - Remove deprecated code for Accolade and fm10k
+
+---------------------------------------
+2023-10-23 PF_RING 8.6.1
+
+* PF_RING Library
+ - New pfring_set_cluster_consumer API to set a kernel cluster with (optional) consumer queue id and support for options (pfring_set_cluster() is set as deprecated)
+
+* PF_RING Kernel Module
+ - Implement 'relaxed' distribution mode in the kernel cluster to deliver packets to the first available queue if a consumer is down (CLUSTER_OPTION_RELAXED_DISTRIBUTION)
+ - Support for kernel 6.4+
+
+* PF_RING Capture Modules and ZC Drivers
+ - New ice zc driver v.1.12.7
+ - New ixgbe zc driver v.5.19.6
+ - New igb zc driver v.5.14.16
+ - Add auto DDP install in ice dkms packages
+
+* Examples
+ - pfsend:
+   - Add -G for seding traffic on two interfaces (one per direcion)
+   - Improve TX rate precision adjust the transmission rate to compensate cpu freq fluctuations
+ - pfcount: print both lib and kernel module versions
+
+* Misc
+ - Fix hugepages file parsing (/etc/hugepages.conf)
+
+---------------------------------------
+2023-09-01 PF_RING 8.6
+
+* PF_RING Library
+ - New Runtime Manager for injecting and removing filtering rules to the socket via Redis
+ - Fix memory leaks in PCAP module
+ - Fix caplen/MTU on loopback capture
+
+* PF_RING Kernel Module
+ - Add support for probabilistic sampling with kernel capture
+
+* FT Library
+ - Improve application protocol guess with nDPI
+
+* PF_RING Capture Modules and ZC Drivers
+ - Add initial support for NVIDIA/Mellanox BlueField
+ - Add Napatech ns timestamp in PCAP mode
+ - Add support for probabilistic sampling with userspace capture
+ - Optimize hw timestamping on ice adapters (Intel E810)
+ - Fix timestamp support when using the ZC burst API with ice adapters
+ - Fix drivers compilation on Kernel 6.x
+ - Fix drivers compilation on RH 8.8
+
+* nPCAP
+ - Fix memory corruption with big index files
+
+* PF_RING-aware Libpcap/Tcpdump
+ - Add PF_RING support to pcap_inject
+ - Fix pcap_read_pf_ring return code (number of packets)
+
+* Examples
+ - zbalance_ipc: add support for multiple balancer threads when using NVIDIA/Mellanox adapters
+ - pfsend: add -c option to balance on dest ip rather than src up
+ - pfcount: compute drop rate in packet mode only
+ - pfcount: report expired licenses
+ - Fix ftflow_dpdk compilation on DPDK 22 or later
+ - Fix memory leaks in pcount, alldevs, preflect, ftflow_pcap, 
+
+* Misc
+ - Add support for Debian 12
+ - Add libelf and libbpf dependencies to packages
+ - Add sbsigntool dependency which includes kmodsign required by dkms
+ - Add revision to pfring-dkms dependency in packages
+ - Fix check for init/systemd presence
+ - Cleanup support for legacy adapters
+
+---------------------------------------
+2023-01-30 PF_RING 8.4
+
+* PF_RING Library
+ - New API pfring_get_ethtool_link_speed
+ - Add vlan_id to flow rule struct
+ - Add optimization flags to BPF filters compiled with pcap_compile
+ - Fix pfring_open_multichannel
+
+* PF_RING Kernel Module
+ - Add keep_vlan_offload option to avoid reinserting VLAN header on VLAN interfaces when used inline
+
+* ZC Library
+ - New ZC APIs (available on supported adapters)
+   - pfring_zc_get_device_clock
+   - pfring_zc_set_device_clock
+   - pfring_zc_adjust_device_clock
+   - pfring_zc_send_pkt_get_time
+ - Add new pfring_zc_run_fanout_v3 API to support more than 64 fan-out queues
+ - Add support for capturing stack packets, used by zcount and zbalance_ipc
+
+* PF_RING Capture Modules and ZC Drivers
+ - New iavf-zc driver to support i40e and ice Virtual Functions
+   - Support for VF trust mode on ice adapters (promisc with SR-IOV)
+ - Improve ice driver (E810 adapters)
+   - Update ice driver to v.1.9.11
+   - Add support to get time, set time, adjust time, send get time
+ - Improvei the NVIDIA/Mellanox (mlx) driver
+   - Extend hardware rules
+   - Add support for VLAN filtering
+   - Add set_default_hw_action API
+   - Fix reported link speed
+   - Fix bidirectional rules
+   - Fix pfring_poll support
+ - Improve the Napatech driver
+   - Add nanosecond timestamp capture when using the packet API in PCAP chunk mode
+ - Improve the ZC drivers API to support more callbacks
+ - Add socket extensions (getsockopt/setsockopt):
+   - SO_GET_DEV_STATS (get_stats ZC drivers callback)
+   - SO_GET_DEV_TX_TIME (get_tx_time ZC drivers callback)
+   - SO_SET_DEV_TIME (set_time ZC drivers callback)
+   - SO_SET_ADJ_TIME (adjust_time ZC drivers callback)
+ - Add management_only_mode to allow opening multiple sockets on the same ZC interface
+ - Update drivers to support latest RH 9.1, Ubuntu 22, Debian kernels
+
+* FT Library
+  - Fix double free
+
+* nBPF 
+ - Add icmp protocol primitive support
+
+* nPCAP
+ - Update npcap lib to support for nanosecond time in packet extraction
+
+* PF_RING-aware Libpcap/Tcpdump
+ - Update tcpdump to v.4.99.1
+ - Update libpcap to v.1.10.1
+
+* Examples
+ - Add ztime example
+   - Ability to set/adjust the card clock without capturing/transmitting traffic (external process)
+   - Test for the send-get-time feature
+ - pfsend
+   - Flush queued packets when waiting at real pcap rate and on shutdown
+   - Fix headers ranzomization 
+   - Fix crash with -z
+ - pfsend_multichannel
+   - Add support for controlling IPs generated
+ - pfcount
+   - Add -I option to print interface info in JSON format
+ - pfcount_multichannel
+   - Print full packet metadata with -v
+ - zbalance_ipc
+   - Add support for up to 128 queues with -m 1 and -m 2 (new v3 api) 
+   - Add -X option to capture TX traffic (standard driver only)
+   - Fix check for queues limit
+ - zdelay
+   - Fix queue size (power of 2)
+
+* Misc
+ - Add pfcount_multichannel and pfsend_multichannel to packages
+ - Service script (pf_ringctl)
+   - Add support for configuring RSS via ethtool
+   - Add pre/post scripts for ZC drivers
+   - Handle multi-line driver conf file
+ - Removed obsolete fm10k driver
+
+---------------------------------------
+2022-06-30 PF_RING 8.2
+
+* PF_RING Library
+ - New new pfring_get_caplen API
+ - New pfring_get_link_type API
+ - Add src_ip_mask and dst_ip_mask to generic_flow_rule
+ - Add priority to hw_filtering_rule
+ - Add module version to device info returned by pfring_findalldevs
+ - Refactor device name parsing
+ - Use sockaddr_ll in bind (to supports interface names longer than 14 chars)
+
+* ZC Library
+ - New Mellanox support for ConnectX 4/5/6 adapters, including hardware offloads for timestamp, filtering, RSS
+ - Fix pfring_zc_numa_get_cpu_node
+
+* FT Library
+ - Add native support for flow export over ZMQ
+
+* PF_RING Kernel Module
+ - Add support for VXLAN
+ - Add support for both sockaddr and sockaddr_ll in bind
+ - Refactor kernel locking
+ - Discard VLAN in hash cluster_per_flow_ip_with_dup_tuple calculation
+ - Detect when a process owning a PF_RING socket changes the PID (e.g. fork)
+ - Export process PID to userspace
+ - Fix compilation on latest kernels for Rocky Linux and RH 8.5, Debian 9, 10, 11, Ubuntu 18, 20, 22
+ - Fix net namespace handling
+ - Fix crash when renaming /proc entries
+
+* PF_RING Capture Modules
+ - Fix drop statistics on Napatech with HBA set
+
+* ZC Drivers
+ - New igb-zc driver v.5.10.2
+ - New i40e-zc driver v.2.17.4
+ - New ice-zc driver v.1.8.8
+
+* nBPF 
+ - Fix double free
+
+* Examples
+ - New sample application pfsend_multichannel to send traffic using RSS
+ - New zdelay application to forward traffic between interfaces, adding a configurable delay
+ - pfcount_multichannel: remove limit on number of threads
+ - zbalance_ipc: improve hashing modes (e.g. add -Y to control eth type)
+ - pfcount:
+   - Add -0 to steer all traffic to RSS queueu 0
+   - Add -P to set rule priority
+ - ftflow_dpdk:
+   - Set RSS mode/hf (required on some adapters e.g. Mellanox)
+   - Use time from hardware timestamp when available
+
+* Misc
+ - Add support for Ubuntu 22
+ - Remove nBroker support (fm10k adapters are EOL)
+
+---------------------------------------
 2021-08-11 PF_RING 8.0
 
 * PF_RING Library

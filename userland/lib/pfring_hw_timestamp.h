@@ -1,6 +1,6 @@
 /*
  *
- * (C) 2011-22 - ntop.org
+ * (C) 2011-26 - ntop
  *
  *
  * This program is free software; you can redistribute it and/or modify
@@ -65,12 +65,15 @@ struct arista_7150_pkt_hw_ts {
 
 /* *********************************************** */
 
-#define VSS_APCON_TS_LEN       sizeof(struct vss_apcon_hw_ts)
-
-struct vss_apcon_hw_ts {
-  u_int32_t sec;
-  u_int32_t nsec;
-  u_int32_t crc;
+struct arista_7280_pkt_hw_ts {
+  u_int16_t subtype;
+  u_int16_t version;
+  struct {
+    u_int32_t tv_sec;
+    u_int32_t tv_nsec;
+  } ts;
+  u_int16_t h_proto;
 } __attribute__((__packed__));
 
 /* *********************************************** */
+

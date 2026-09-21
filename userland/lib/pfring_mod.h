@@ -1,6 +1,6 @@
 /*
  *
- * (C) 2005-22 - ntop.org
+ * (C) 2005-26 - ntop
  *
  *
  * This program is free software; you can redistribute it and/or modify
@@ -41,7 +41,8 @@ int pfring_mod_set_filtering_sampling_rate(pfring *ring, u_int32_t rate);
 int pfring_mod_get_selectable_fd(pfring *ring);
 int pfring_mod_set_direction(pfring *ring, packet_direction direction);
 int pfring_mod_set_socket_mode(pfring *ring, socket_mode mode);
-int pfring_mod_set_cluster(pfring *ring, u_int clusterId, cluster_type the_type);
+int pfring_mod_set_cluster_consumer(pfring *ring, u_int16_t cluster_id, u_int16_t queue_id,
+                                    cluster_type the_type, u_int32_t options);
 int pfring_mod_remove_from_cluster(pfring *ring);
 int pfring_mod_set_master_id(pfring *ring, u_int32_t master_id);
 int pfring_mod_set_master(pfring *ring, pfring *master);
@@ -72,7 +73,7 @@ int pfring_mod_set_virtual_device(pfring *ring, virtual_filtering_device_info *i
 int pfring_mod_loopback_test(pfring *ring, char *buffer, u_int buffer_len, u_int test_len);
 int pfring_mod_enable_ring(pfring *ring);
 int pfring_mod_disable_ring(pfring *ring);
-int pfring_mod_set_bpf_filter(pfring *ring, char *filter_buffer);
+int pfring_mod_set_bpf_filter(pfring *ring, const char *filter_buffer);
 int pfring_mod_remove_bpf_filter(pfring *ring);
 int pfring_mod_send_last_rx_packet(pfring *ring, int tx_interface_id);
 void pfring_mod_shutdown(pfring *ring);

@@ -14,19 +14,21 @@ PF_RING is a high speed packet capture library that turns a commodity PC into an
    examples
    modules/index
    rss
-   nbpf/index
+   filtering/index
    containers/index
    vm/index
    thirdparty/index
    hugepages
    capabilities
    amd
+   intel
 
 .. toctree::
    :maxdepth: 2
    :caption: Developer's Guide
 
    api/index
+   debug
 
 .. toctree::
    :caption: Other Products
@@ -39,7 +41,8 @@ PF_RING is a high speed packet capture library that turns a commodity PC into an
    nEdge <https://www.ntop.org/guides/nedge/>
    nScrub <https://www.ntop.org/guides/nscrub/>
    nBox <https://www.ntop.org/guides/nbox/>
-
+   nTap <https://www.ntop.org/guides/ntap/>
+   
 .. Indices and tables
 .. ==================
 .. 

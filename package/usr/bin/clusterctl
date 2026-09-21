@@ -5,6 +5,30 @@
 
 FORCESTART=0
 
+start_cluster_id_deps() {
+	CLUSTER_ID=$1
+
+	START_NPROBE_INSTANCES="$(/bin/ls /etc/nprobe/nprobe-cluster_${CLUSTER_ID}-*.conf 2>/dev/null)"
+	for NPROBE_ELEM in $START_NPROBE_INSTANCES
+	do
+		NPROBE_ELEM=${NPROBE_ELEM#/etc/nprobe/nprobe-}
+		NPROBE_ELEM=${NPROBE_ELEM%.conf}
+		if hash systemctl 2>/dev/null && [ -f /etc/systemd/system/nprobe@.service ]; then
+			/bin/systemctl restart "nprobe@$NPROBE_ELEM"
+		fi
+	done
+
+	START_N2DISK_INSTANCES="$(/bin/ls /etc/n2disk/n2disk-cluster_${CLUSTER_ID}_*.conf 2>/dev/null)"
+	for N2DISK_ELEM in $START_N2DISK_INSTANCES
+	do
+		N2DISK_ELEM=${N2DISK_ELEM#/etc/n2disk/n2disk-}
+		N2DISK_ELEM=${N2DISK_ELEM%.conf}
+		if hash systemctl 2>/dev/null && [ -f /etc/systemd/system/n2disk@.service ]; then
+			/bin/systemctl restart "n2disk@$N2DISK_ELEM"
+		fi
+	done
+}
+
 start_cluster_id() {
 	CLUSTER_ID=$1
 
@@ -62,8 +86,6 @@ stop_cluster_id_deps() {
 		NPROBE_ELEM=${NPROBE_ELEM%.conf}
 		if hash systemctl 2>/dev/null && [ -f /etc/systemd/system/nprobe@.service ]; then
 			/bin/systemctl stop "nprobe@$NPROBE_ELEM"
-		elif [ -f /etc/init.d/nprobe ]; then
-			/etc/init.d/nprobe stop $NPROBE_ELEM
 		fi
 	done
 
@@ -74,8 +96,6 @@ stop_cluster_id_deps() {
 		N2DISK_ELEM=${N2DISK_ELEM%.conf}
 		if hash systemctl 2>/dev/null && [ -f /etc/systemd/system/n2disk@.service ]; then
 			/bin/systemctl stop "n2disk@$N2DISK_ELEM"
-		elif [ -f /etc/init.d/n2disk ]; then
-			/etc/init.d/n2disk stop $N2DISK_ELEM
 		fi
 	done
 }
@@ -261,14 +281,21 @@ get_status() {
 
 ########
 
+ACTION=$1
 PARAM_CLUSTER_ID=$2
 
-logger "cluster $1 $2"
+logger "cluster $ACTION $PARAM_CLUSTER_ID"
 
-case "$1" in
+echo "$(/bin/date) clusterctl $ACTION called" >> /var/log/ntop-systemd.log
+
+case "$ACTION" in
   start)
 	FORCESTART=1
 	start_cluster "$PARAM_CLUSTER_ID";
+	;;
+
+  start-deps)
+	start_cluster_id_deps "$PARAM_CLUSTER_ID";
 	;;
 
   start-if-enabled)
@@ -301,8 +328,10 @@ case "$1" in
 	;;
 
   *)
-	echo "Usage: ${0} {start|stop|restart|status} [cluster ID(s)]"
+	echo "Usage: ${0} {start|stop|restart|status|start-deps|stop-deps} [cluster ID(s)]"
 	exit 1
 esac
+
+echo "$(/bin/date) clusterctl $ACTION done" >> /var/log/ntop-systemd.log
 
 exit 0

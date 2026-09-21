@@ -1,5 +1,5 @@
 /*
- * (C) 2003-20 - ntop 
+ * (C) 2003-26 - ntop 
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -99,7 +99,7 @@ void sigproc(int sig) {
 /* *************************************** */
 
 void printHelp(void) {
-  printf("pfwrite - (C) 2003-20 ntop.org\n");
+  printf("pfwrite - (C) 2003-26 ntop\n");
   printf("-h              [Print help]\n");
   printf("-i <device>     [Device name]\n");
   printf("-w <dump file>  [Dump file path]\n");
@@ -580,7 +580,7 @@ int main(int argc, char* argv[]) {
 
 	if(hdr.extended_hdr.timestamp_ns) {
 	  s = ((hdr.extended_hdr.timestamp_ns / 1000000000) + thiszone) % 86400;
-	  /* "else" intel_igb_82580 has 40 bit ts, using gettimeofday seconds:
+	  /* "else" intel_igb_ts (i350/82580) has 40 bit ts, using gettimeofday seconds:
 	   * be careful with drifts mixing sys time and hw timestamp */
 	  usec = (hdr.extended_hdr.timestamp_ns / 1000) % 1000000;
 	  nsec = hdr.extended_hdr.timestamp_ns % 1000;

@@ -4,22 +4,33 @@
 #
 
 DISTRO="unknown"
-if [ -f /lib/lsb/init-functions ]; then
+if grep -q 'ID_LIKE=debian\|ID=debian' /etc/os-release; then
+#if [ -f /lib/lsb/init-functions ]; then
 	DISTRO="debian"
 	. /lib/lsb/init-functions
-fi
-if [ -f /etc/init.d/functions ]; then
-	DISTRO="centos"
+elif [ -f /etc/init.d/functions ]; then
+	DISTRO="rh"
 	. /etc/init.d/functions
+elif [ -e /etc/redhat-release ]; then
+	DISTRO="rh"
+	echo_failure() {
+		echo -n "[FAILURE]"
+		echo -ne "\r"
+	}
+	echo_success() {
+		echo -n "[ OK ]"
+		echo -ne "\r"
+	}
 fi
 
 PF_RING="pf_ring"
 PF_RING_CONFIG_DIR="/etc/pf_ring"
 DRIVERS_FLAVOR=("zc")
-DKMS_DRIVERS=('e1000e' 'igb' 'ixgbe' 'ixgbevf' 'i40e' 'fm10k' 'ice')
+DKMS_DRIVERS=('e1000e' 'igb' 'ixgbe' 'ixgbevf' 'i40e' 'ice' 'iavf')
+# Same as DKMS_DRIVERS but in reverse order based on driver dependencies (iavf depends on ice and i40e)
+DKMS_DRIVERS_UNLOAD=('e1000e' 'igb' 'ixgbevf' 'ixgbe' 'iavf' 'i40e' 'ice')
 ERROR=0
 DRIVER_INSTALLED=0
-OLD_HUGEPAGES_CONFIG="${PF_RING_CONFIG_DIR}/hugepages"
 HUGEPAGES_CONFIG="${PF_RING_CONFIG_DIR}/hugepages.conf"
 HUGEPAGES_SIZE=`grep Hugepagesize /proc/meminfo | cut -d ':' -f 2|sed 's/kB//g'|sed 's/ //g'` # KB
 HUGEPAGES_MOUNTPOINT="/dev/hugepages"
@@ -27,10 +38,11 @@ MTU_CONFIG="${PF_RING_CONFIG_DIR}/mtu.conf"
 FORCESTART=0
 FORCESTART_FILE="${PF_RING_CONFIG_DIR}/pf_ring.start"
 DRIVER_FORCESTART_FILE="${PF_RING_CONFIG_DIR}/forcestart" # touch to load zc even if it matches the management
+DRIVER_KEEPOFFLOAD_FILE="${PF_RING_CONFIG_DIR}/keepoffload" # touch to keep offload settings on the interfaces
 DO_NOT_LOAD_HUGEPAGES=0 # set to 1 to disable hugepages preallocation
 LOAD_HUGEPAGES=0
 INTERFACES_CONFIG="${PF_RING_CONFIG_DIR}/interfaces.conf"
-MEM_AVAIL=1048576 # 1GB Hugepages (this avoids consuming all memory at boot time, causing kernel panic)
+HUGEPAGES_MEM=1048576 # 1GB Hugepages (this avoids consuming all memory at boot time, causing kernel panic)
 
 # Including interfaces conf containing MANAGEMENT_INTERFACES, CAPTURE_INTERFACES
 [ -f ${INTERFACES_CONFIG} ] && . ${INTERFACES_CONFIG}
@@ -63,7 +75,7 @@ function dkms_installed {
 		if [ `dpkg -l | grep $1-zc-dkms | wc -l` -gt 0 ]; then
 			return 0
 		fi
-	elif [ ${DISTRO} == "centos" ]; then
+	elif [ ${DISTRO} == "rh" ]; then
 		if [ `rpm -qa | grep $1-zc | wc -l` -gt 0 ]; then
 			return 0
 		fi
@@ -91,16 +103,16 @@ check_pf_ring() {
 			log_failure_msg "${MSG}"
 			log_end_msg $ERROR
 			exit 99
-		elif [ ${DISTRO} == "centos" ]; then
+		elif [ ${DISTRO} == "rh" ]; then
 			echo -n ${MSG} 
 			echo_failure; echo
 			exit 99
 		fi
 	elif [ ${WARNING} -gt 0 ]; then
 		[ ${DISTRO} == "debian" ] && log_daemon_msg "${MSG}"
-		[ ${DISTRO} == "centos" ] && echo -n "${MSG}"
+		[ ${DISTRO} == "rh" ] && echo -n "${MSG}"
 		[ ${DISTRO} == "debian" ] && log_end_msg $ERROR
-		[ ${DISTRO} == "centos" ] && echo_success && echo
+		[ ${DISTRO} == "rh" ] && echo_success && echo
 	fi
 
 	return $RETVAL
@@ -120,7 +132,7 @@ rebuild_dkms() {
 	if [ ${DISTRO} == "debian" ]; then
 		SUFFIX="-dkms"
 		MOD_VERSION=`dpkg -l | grep ${1}${SUFFIX} | awk '{print $3}'`
-	elif [ ${DISTRO} == "centos" ]; then
+	elif [ ${DISTRO} == "rh" ]; then
 		SUFFIX=""
 		if [ ${1} == "pfring" ]; then
 			SUFFIX="-dkms"
@@ -144,13 +156,13 @@ check_hugepages() {
 	HUGEPAGES_TOTAL=0
 	if [ -f ${HUGEPAGES_CONFIG} ]; then
 		while IFS=" " read HUGEPAGES_NODE HUGEPAGES_NUMBER HUGEPAGES_GID; do
-			HUGEPAGES_TOTAL=$(( HUGEPAGES_TOTAL + ${HUGEPAGES_NUMBER/hugepagenumber=/} ))
+			[ -z "${HUGEPAGES_NUMBER}" ] || HUGEPAGES_TOTAL=$(( HUGEPAGES_TOTAL + ${HUGEPAGES_NUMBER/hugepagenumber=/} ))
 		done < ${HUGEPAGES_CONFIG}
 	else
-		HUGEPAGES_TOTAL=$(( MEM_AVAIL / HUGEPAGES_SIZE ))
+		HUGEPAGES_TOTAL=$(( HUGEPAGES_MEM / HUGEPAGES_SIZE ))
 	fi
 
-	#check if huge pages are already loaded and the number of pages are greater than defined or minimum value
+	# Check if hugepages are already loaded and the number of pages are greater than defined or minimum value
 	if [ `cat /sys/kernel/mm/hugepages/hugepages-${HUGEPAGES_SIZE}kB/nr_hugepages` -gt ${HUGEPAGES_TOTAL} ] && [ `grep ${HUGEPAGES_MOUNTPOINT} /proc/mounts | wc -l` -gt 0 ]; then
 		LOAD_HUGEPAGES=0
 		return
@@ -162,12 +174,24 @@ unload_hugepages() {
 	echo 0 > /sys/kernel/mm/hugepages/hugepages-${HUGEPAGES_SIZE}kB/nr_hugepages
 }
 
+create_hugepages_config() {
+	HUGEPAGES_PER_NODE=$(( HUGEPAGES_MEM / HUGEPAGES_SIZE ))
+	for node in "/sys/devices/system/node/node"*; do
+		nodeid=${node:29}
+		echo "node=${nodeid} hugepagenumber=${HUGEPAGES_PER_NODE}" >> ${HUGEPAGES_CONFIG}
+	done
+}
+
 load_hugepages() {
 	check_hugepages
 	HUGEPAGES_NUMBER=0
 	if [ ${LOAD_HUGEPAGES} -eq 0 ]; then
 		#hugepages already loaded
 		return
+	fi
+
+	if [ ! -f ${HUGEPAGES_CONFIG} ]; then
+		create_hugepages_config
 	fi
 
 	MOUNT_OPTION=""
@@ -188,13 +212,14 @@ load_hugepages() {
 		done <<< "$(cat ${HUGEPAGES_CONFIG})"
 	else # set it to default
 		# Computing max available
-		#MEM_AVAIL=`grep MemFree /proc/meminfo | cut -d ':' -f 2|sed 's/kB//g'|sed 's/ //g'`;
-		#MEM_AVAIL=$(( MEM_AVAIL - 524288 ))
-		HUGEPAGES_NUMBER=$(( MEM_AVAIL / HUGEPAGES_SIZE ))
+		#HUGEPAGES_MEM=`grep MemFree /proc/meminfo | cut -d ':' -f 2|sed 's/kB//g'|sed 's/ //g'`;
+		#HUGEPAGES_MEM=$(( HUGEPAGES_MEM - 524288 ))
+		HUGEPAGES_NUMBER=$(( HUGEPAGES_MEM / HUGEPAGES_SIZE ))
 		if [[ ${HUGEPAGES_NUMBER} -gt 0 ]]; then
 			echo ${HUGEPAGES_NUMBER} > /sys/kernel/mm/hugepages/hugepages-${HUGEPAGES_SIZE}kB/nr_hugepages
 		fi
 	fi
+
 	if [ `grep ${HUGEPAGES_MOUNTPOINT} /proc/mounts | wc -l` -eq 0 ]; then
 		if [ ! -d ${HUGEPAGES_MOUNTPOINT} ]; then
 			mkdir ${HUGEPAGES_MOUNTPOINT}
@@ -235,8 +260,11 @@ start_interfaces() {
 		fi
 
 		if [ $SETUP_FOR_PACKET_CAPTURE -eq 1 ] && ! is_management_interface $D_PHYSIF ; then
-			# Disabling offloads
-			/sbin/ethtool -K "${D}" sg off tso off gso off gro off > /dev/null 2>&1
+
+			if [ ! -f ${DRIVER_KEEPOFFLOAD_FILE} ]; then
+				# Disabling offloads
+				/sbin/ethtool -K "${D}" sg off tso off gso off gro off > /dev/null 2>&1
+			fi
 
 			# Disabling VLAN stripping
 			/sbin/ethtool -K "${D}" rxvlan off > /dev/null 2>&1
@@ -259,12 +287,40 @@ start_interfaces() {
 	done
 }
 
+# Configure RSS using ethtool
+configure_rss() {
+	# Default RSS queues
+	DEF_RSS=1
+
+	# Driver name (e.g. mlx5_core)
+	D=$1
+	# Family (e.g. zc)
+	F=$2
+	# Configuration name (e.g. mlx)
+	C=$3
+
+	# Setting configured number of RSS queues (or default)
+	INTERFACES=$(cat /proc/net/dev|grep ':'|grep -v 'lo'|grep -v 'sit'|awk -F":" '{print $1}'|tr -d ' ')
+	for IF in $INTERFACES ; do
+		D_MATCH=$(ethtool -i $IF|grep "${D}\$"|wc -l)
+		D_ZC_MATCH=$(ethtool -i $IF|grep "${D}_zc\$"|wc -l)
+
+		if [ "$D_MATCH" -eq 1 ] || [ "$D_ZC_MATCH" -eq 1 ]; then
+			RSS=$(cat ${PF_RING_CONFIG_DIR}/${F}/${C}/${C}.conf 2>/dev/null | grep RSS | cut -d'=' -f2 | cut -d',' -f1)
+			if [ -z "${RSS}" ]; then
+				RSS=$DEF_RSS
+			fi
+			ethtool -L ${IF} combined ${RSS}
+		fi
+	done
+}
+
 load_driver() {
 	DRV_PARAM=""
 
 	if [ `/sbin/modinfo ${1}-${2} | wc -l` -gt 1 ]; then
 		# driver is available
-		DRV_PARAM=`cat ${PF_RING_CONFIG_DIR}/${2}/${1}/${1}.conf`
+		DRV_PARAM=`cat ${PF_RING_CONFIG_DIR}/${2}/${1}/${1}.conf | tr '\n' ' '`
 		if [ ! -f ${DRIVER_FORCESTART_FILE} ] && is_management_interface_driver ${1} ; then
 			echo "Skipping driver ${1}: driver matches the management interface"
 			return
@@ -277,6 +333,11 @@ load_driver() {
 			if [ ${1} == "i40e" ]; then
 				/sbin/modprobe -r i40iw 2>/dev/null
 			fi
+			if [ ${1} == "ice" ]; then
+				# Note: modprobe -r also unloads i40e (dependency)
+				#/sbin/modprobe -r irdma 2>/dev/null
+				/usr/sbin/rmmod irdma 2>/dev/null
+			fi
 
 			/sbin/modprobe -r ${1}
 			if [ `echo $?` -gt 0 ]; then
@@ -284,27 +345,63 @@ load_driver() {
 				return
 			fi
 		fi
-			
+
 		# check if already loaded
 		if [ `lsmod |grep -w ^${1}_${2} | wc -l` -eq 1 ]; then
 			echo "Driver ${1}-${2} already installed"
 			DRIVER_INSTALLED=1
 			return
 		fi
-			
-		/sbin/modprobe ${1}_${2} ${DRV_PARAM}
+
+		# Check if there is a pre script (e.g. used for VFs configuration)
+		DRV_PRE_SCRIPT="${PF_RING_CONFIG_DIR}/${2}/${1}/${1}.pre"
+		if [ -x ${DRV_PRE_SCRIPT} ]; then
+			${DRV_PRE_SCRIPT}
+			if [ ${1} == "iavf" ] || [ ${1} == "ixgbevf" ]; then
+				# Sleep a bit (pre is usually used to create VFs)
+				sleep 1
+
+				# Make sure the kernel driver has not been loaded
+				/sbin/modprobe -r ${1}
+				if [ `echo $?` -gt 0 ]; then
+					echo "Error unloading driver ${1}"
+					return
+				fi
+			fi
+		fi
+
+		#/sbin/modprobe ${1}_${2} ${DRV_PARAM}
+		output=$(/sbin/modprobe ${1}_${2} ${DRV_PARAM} 2>&1)
+
 		if [ `echo $?` -gt 0 ]; then
-			echo "Error loading driver ${1}-${2}"
-			# last resort: try rebuilding dkms driver
-			rebuild_dkms ${1}-${2}
-			# attempt to load the driver now that it has been rebuilt
-			/sbin/modprobe ${1}_${2} ${DRV_PARAM}
-			if [ `echo $?` -eq 0 ]; then
-				DRIVER_INSTALLED=1
+			echo "Error loading driver ${1}-${2}: ${output}"
+			if echo "$output" | grep -q "Device or resource busy"; then
+				# busy?
+				:
+			else
+				# last resort: try rebuilding dkms driver
+				rebuild_dkms ${1}-${2}
+				# attempt to load the driver now that it has been rebuilt
+				/sbin/modprobe ${1}_${2} ${DRV_PARAM}
+				if [ `echo $?` -eq 0 ]; then
+					DRIVER_INSTALLED=1
+				fi
 			fi
 		else 
 			DRIVER_INSTALLED=1
 		fi
+
+		if [ ${1} == "iavf" ] || [ ${1} == "ixgbevf" ]; then
+			# Setting configured number of RSS queues (or default)
+			configure_rss ${1} ${2} ${1}
+		fi
+
+		# Check if there is a post script
+		DRV_POST_SCRIPT="${PF_RING_CONFIG_DIR}/${2}/${1}/${1}.post"
+		if [ -x ${DRV_POST_SCRIPT} ]; then
+			${DRV_POST_SCRIPT}
+		fi
+
 	else
 		echo "Driver ${1}-${2} not available"
 	fi
@@ -317,9 +414,16 @@ load_zc() {
 	/sbin/modprobe vxlan > /dev/null 2>&1
 	/sbin/modprobe dca > /dev/null 2>&1
 	/sbin/modprobe configfs > /dev/null 2>&1
+	/sbin/modprobe gnss > /dev/null 2>&1
+
+	modinfo -n intel_auxiliary > /dev/null 2>&1
+	HAS_INTEL_AUXILIARY=$?
+	if [ $HAS_INTEL_AUXILIARY -eq 0 ]; then
+		/sbin/modprobe intel_auxiliary > /dev/null 2>&1
+	fi
 
 	# load dkms drivers
-	# search for file under /etc/pf_ring/zc/{e1000e,igb,ixgbe,ixgbevf,i40e,fm10k,ice}/{e1000e,igb,ixgbe,ixgbevf,i40e,fm10k,ice}.conf
+	# search for file under /etc/pf_ring/zc/{e1000e,igb,ixgbe,ixgbevf,i40e,iavf,ice}/{e1000e,igb,ixgbe,ixgbevf,i40e,iavf,ice}.conf
 	for F in ${DRIVERS_FLAVOR[@]} ; do
 		for D in ${DKMS_DRIVERS[@]} ; do
 			if [ -f ${PF_RING_CONFIG_DIR}/${F}/${D}/${D}.conf ] && [ -f ${PF_RING_CONFIG_DIR}/${F}/${D}/${D}.start ]; then
@@ -366,20 +470,7 @@ load_mlx() {
 		modprobe -a ib_uverbs mlx5_core mlx5_ib > /dev/null 2>&1
 
 		# Setting configured number of RSS queues (or default)
-		INTERFACES=$(cat /proc/net/dev|grep ':'|grep -v 'lo'|grep -v 'sit'|awk -F":" '{print $1}'|tr -d ' ')
-		for IF in $INTERFACES ; do
-			D_MATCH=$(ethtool -i $IF|grep "$D\$"|wc -l)
-
-			if [ "$D_MATCH" -eq 1 ]; then
-				RSS=$(cat ${PF_RING_CONFIG_DIR}/${F}/${C}/${C}.conf 2>/dev/null | grep RSS | cut -d'=' -f2 | cut -d',' -f1)
-				if [ -z "${RSS}" ]; then
-					# Default: 1 queue
-					RSS=$DEF_RSS
-				fi
-
-				ethtool -L ${IF} combined ${RSS}
-			fi
-		done
+		configure_rss ${D} ${F} ${C}
 	fi
 }
 
@@ -405,7 +496,7 @@ unload_driver() {
 unload_zc() {
 	UNLOAD_HUGEPAGES=0
 	for F in ${DRIVERS_FLAVOR[@]} ; do
-		for D in ${DKMS_DRIVERS[@]} ; do
+		for D in ${DKMS_DRIVERS_UNLOAD[@]} ; do
 			if [ `/sbin/lsmod | grep -w ^${D}_${F} |wc -l ` -eq 1 ]; then
 				unload_driver ${D} ${F}
 				if [ ${F} == "zc" ] && [ ${DO_NOT_LOAD_HUGEPAGES} -eq 0 ]; then
@@ -426,7 +517,7 @@ start_pf_ring() {
 
 	if [ ! -d /var/lib/dkms/pfring ]; then
 		[ ${DISTRO} == "debian" ] && log_daemon_msg "PF_RING kernel module not installed, please install pfring-dkms"
-		[ ${DISTRO} == "centos" ] && echo "PF_RING kernel module not installed, please install pfring-dkms"
+		[ ${DISTRO} == "rh" ] && echo "PF_RING kernel module not installed, please install pfring-dkms"
 		return
 	fi
 
@@ -436,12 +527,12 @@ start_pf_ring() {
 		
 		echo "PF_RING not enabled: please touch /etc/pf_ring/pf_ring.start"
 		[ ${DISTRO} == "debian" ] && log_end_msg $ERROR
-		[ ${DISTRO} == "centos" ] && echo_success && echo
+		[ ${DISTRO} == "rh" ] && echo_success && echo
 		return
 	fi
 
 	[ ${DISTRO} == "debian" ] && log_daemon_msg "Starting PF_RING module"
-	[ ${DISTRO} == "centos" ] && echo -n "Starting PF_RING module: "
+	[ ${DISTRO} == "rh" ] && echo -n "Starting PF_RING module: "
 
 	# Set CPU freq to performance useful in particular
 	# on CPUs with aggressive scaling such as Intel E5
@@ -486,7 +577,7 @@ start_pf_ring() {
 				log_failure_msg "${MSG}"
 				log_end_msg $ERROR
 				exit 99
-			elif [ ${DISTRO} == "centos" ]; then
+			elif [ ${DISTRO} == "rh" ]; then
 				echo -n ${MSG} 
 				echo_failure; echo
 				exit 99
@@ -512,21 +603,20 @@ start_pf_ring() {
 	## Load dummy interfaces associated to timelines or nic cards ##
 	local N2IF_SCRIPT="/usr/bin/n2if"
 	if [ -f "${N2IF_SCRIPT}" ]; then
-	${N2IF_SCRIPT} up-all
-	sleep 1
+		${N2IF_SCRIPT} up-all
+		sleep 1
 	fi
 	
 	start_interfaces 1
 
 	[ ${DISTRO} == "debian" ] && log_end_msg $ERROR
-	[ ${DISTRO} == "centos" ] && echo_success && echo
+	[ ${DISTRO} == "rh" ] && echo_success && echo
 }
-
 
 stop_pf_ring() {
 
 	[ ${DISTRO} == "debian" ] && log_daemon_msg "Stopping PF_RING module"
-	[ ${DISTRO} == "centos" ] && echo -n "Stopping PF_RING module: "
+	[ ${DISTRO} == "rh" ] && echo -n "Stopping PF_RING module: "
 
 	check_pf_ring stop
 
@@ -588,12 +678,12 @@ stop_pf_ring() {
 	if [ ${NUM} -gt 0 ]; then
 		MSG="unable to unload PF_RING module"
 			[ ${DISTRO} == "debian" ] && log_failure_msg "$MSG"
-			[ ${DISTRO} == "centos" ] && echo_failure
+			[ ${DISTRO} == "rh" ] && echo_failure
 			ERROR=1
 	fi
 	fi
 	[ ${DISTRO} == "debian" ] && log_end_msg $ERROR
-	[ ${DISTRO} == "centos" ] && echo_success && echo
+	[ ${DISTRO} == "rh" ] && echo_success && echo
 }
 
 check_driver_status() {
@@ -689,9 +779,11 @@ init_config() {
 }
 ########
 
-echo "$(/bin/date) pf_ringctl $1" >> /var/log/ntop-systemd.log
+ACTION=$1
 
-case "$1" in
+echo "$(/bin/date) pf_ringctl $ACTION called" >> /var/log/ntop-systemd.log
+
+case "$ACTION" in
   start)
 	FORCESTART=1
 	start_pf_ring;
@@ -725,6 +817,6 @@ case "$1" in
 	exit 1
 esac
 
-echo "$(/bin/date) pf_ringctl done" >> /var/log/ntop-systemd.log
+echo "$(/bin/date) pf_ringctl $ACTION done" >> /var/log/ntop-systemd.log
 
 exit 0

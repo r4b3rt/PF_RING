@@ -1,5 +1,5 @@
 #
-# (C) 2009-15 - ntop.org
+# (C) 2009-23 - ntop.org
 #
 
 obj-m := pf_ring.o
@@ -73,8 +73,8 @@ dkms-rpm:
 	sudo $(MAKE) -f Makefile.dkms rpm
 
 clean:
-	$(MAKE) -C $(KERNEL_SRC) SUBDIRS=$(HERE) clean || true
-	\rm -f *~ Module.symvers Module.markers modules.order *#
+	$(MAKE) -C $(KERNEL_SRC) M=$(HERE) clean || true
+	\rm -f *~ Module.symvers Module.markers modules.order
 
 install:
 	mkdir -p $(INSTDIR)

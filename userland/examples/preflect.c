@@ -1,5 +1,5 @@
 /*
- * (C) 2003-20 - ntop 
+ * (C) 2003-26 - ntop 
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -58,7 +58,7 @@ void dummyProcesssPacket(u_char *_deviceId,
 
 void printHelp(void) {
 
-  printf("preflect\n(C) 2010-22 ntop.org\n");
+  printf("preflect\n(C) 2010-26 ntop\n");
   printf("-h              [Print help]\n");
   printf("-i <device>     [In device name]\n");
   printf("-o <device>     [Out device name]\n");
@@ -120,16 +120,19 @@ int main(int argc, char* argv[]) {
       if(pcap_setfilter(pd, &fcode) < 0) {
 	printf("pcap_setfilter error: '%s'\n", pcap_geterr(pd));
       }
+      pcap_freecode(&fcode);
     }
   }
 
   if((out_pd = pcap_open_live(out_device, snaplen, promisc, 500, errbuf)) == NULL) {
     printf("pcap_open_live: %s\n", errbuf);
+    pcap_close(pd);
     return(-1);
   }
 
   pcap_loop(pd, -1, dummyProcesssPacket, NULL);
   pcap_close(pd);
+  pcap_close(out_pd);
 
   return(0);
 }

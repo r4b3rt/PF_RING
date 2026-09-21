@@ -8,10 +8,9 @@ Napatech module at runtime.
 Prerequisite
 ------------
 
-Napatech drivers and SDK installed. Latest Napatech SDK is available for download at https://www.napatech.com/downloads/.
+Napatech drivers and SDK installed (12.11.24 or newer).
 
-Note: as of PF_RING 6.6 dynamic linking is used and you are able to use
-any ntanl driver version.
+The Napatech SDK is available for download at https://www.napatech.com/downloads/.
 
 After installing the Napatech SDK, please make sure the driver is loaded with:
 
@@ -50,6 +49,12 @@ In order to open a stream you should specify nt:stream<ID>, example:
 .. code-block:: console
 
    pfcount -i nt:stream0
+
+In case of multiple adapters, it is possible to specify the adapter id for the stream with nt:<adapter ID>:stream<ID>, example:
+
+.. code-block:: console
+
+   pfcount -i nt:1:stream0
 
 Streams with port aggregation or distribution (similar to RSS) can be created using the ntpl tool (ntpl -e "<command>")
 

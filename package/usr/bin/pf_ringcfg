@@ -6,7 +6,7 @@
 SCRIPTPATH="$(cd "$(dirname "$0")"; pwd -P)"
 
 PF_RING_CONFIG_DIR="/etc/pf_ring"
-ZC_DRIVERS=('e1000e' 'igb' 'ixgbe' 'ixgbevf' 'i40e' 'fm10k' 'ice')
+ZC_DRIVERS=('e1000e' 'igb' 'ixgbe' 'ixgbevf' 'i40e' 'iavf' 'ice')
 OTHER_SUPPORTED=('mlx5_core')
 
 CONF_DRIVER_NAME=""
@@ -21,10 +21,19 @@ DISTRO="unknown"
 if [ -f /lib/lsb/init-functions ]; then
 	DISTRO="debian"
 	. /lib/lsb/init-functions
-fi
-if [ -f /etc/init.d/functions ]; then
-	DISTRO="centos"
+elif [ -f /etc/init.d/functions ]; then
+	DISTRO="rh"
 	. /etc/init.d/functions
+elif [ -e /etc/redhat-release ]; then
+	DISTRO="rh"
+	echo_failure() {
+		echo -n "[FAILURE]"
+		echo -ne "\r"
+	}
+	echo_success() {
+		echo -n "[ OK ]"
+		echo -ne "\r"
+	}
 fi
 
 if [[ $EUID -ne 0 ]]; then
@@ -37,7 +46,7 @@ pfring_installed() {
 		if [ `dpkg -l | grep pfring-dkms | wc -l` -gt 0 ]; then
 			return 0
 		fi
-	elif [ ${DISTRO} == "centos" ]; then
+	elif [ ${DISTRO} == "rh" ]; then
 		if [ `rpm -qa | grep pfring-dkms | wc -l` -gt 0 ]; then
 			return 0
 		fi
@@ -51,7 +60,7 @@ zc_driver_installed() {
 		if [ `dpkg -l | grep ${MODEL}-zc-dkms | wc -l` -gt 0 ]; then
 			return 0
 		fi
-	elif [ ${DISTRO} == "centos" ]; then
+	elif [ ${DISTRO} == "rh" ]; then
 		if [ `rpm -qa | grep ${MODEL}-zc | wc -l` -gt 0 ]; then
 			return 0
 		fi
@@ -64,7 +73,7 @@ install_pfring() {
 		apt-get clean all
 		apt-get update
 		apt-get install pfring-dkms
-	elif [ ${DISTRO} == "centos" ]; then
+	elif [ ${DISTRO} == "rh" ]; then
 		yum clean all
 		yum update
 		yum install pfring-dkms
@@ -78,7 +87,7 @@ install_zc_driver() {
 		apt-get clean all
 		apt-get update
 		apt-get install pfring-dkms ${MODEL}-zc-dkms
-	elif [ ${DISTRO} == "centos" ]; then
+	elif [ ${DISTRO} == "rh" ]; then
 		yum clean all
 		yum update
 		yum install pfring-dkms ${MODEL}-zc
@@ -176,6 +185,19 @@ get_actual_rss_queues() {
 	fi
 }
 
+get_interface_alias() {
+	IF=$1
+	ALIAS=""
+
+	# Check if pfcount is available
+	if ! hash pfcount 2>/dev/null; then
+		return
+	fi
+
+	# Get interface name in PF_RING (e.g. ens4f0np0 -> mlx:mlx5_0)
+	ALIAS=$(pfcount -L -v 1 2>/dev/null | awk -v ifname="$IF" '$2 == ifname {print $1}' | tail -n1)
+}
+
 print_drivers() {
 	for D in ${ZC_DRIVERS[@]} ; do
 		echo "${D}"
@@ -187,6 +209,7 @@ print_drivers() {
 }
 
 print_interfaces() {
+        MLX_FOUND=0
 	INTERFACES=($(cat /proc/net/dev | grep ':' | cut -d ':' -f 1|grep -v 'lo' | tr '\n' ' '| sed 's/  / /g'))
 	for IF in ${INTERFACES[@]} ; do
 
@@ -200,6 +223,7 @@ print_interfaces() {
 
 		get_interface_driver ${IF}
 		get_actual_rss_queues ${IF}
+		get_interface_alias ${IF}
 
 		INFO=""
 		if is_interface_running_zc ${IF}; then
@@ -207,14 +231,34 @@ print_interfaces() {
 		elif is_supported_by_zc ${DRIVER}; then
 			INFO="[Supported by ZC]"
 		elif is_supported_by_other ${DRIVER}; then
-			INFO="[Supported by ZC]"
+		        if [[ "${DRIVER}" == "mlx5_core" ]]; then
+			    MLX_FOUND=1
+			fi
+			INFO="[Running ZC]"
 		else
 			INFO="[Linux Driver]"
 		fi
 
-		printf "Name: %-20s Driver: %-10s RSS: %-8s %-15s" "${IF}" "${DRIVER}" "${ACTUAL_RSS_QUEUES}" "${INFO}"
+		# Use alias if available, otherwise use the linux interface name
+		DISPLAY_NAME="${IF}"
+		if [ ! -z "$ALIAS" ]; then
+			DISPLAY_NAME="${ALIAS}"
+		fi
+
+		printf "Name: %-20s Driver: %-10s RSS: %-8s %-15s" "${DISPLAY_NAME}" "${DRIVER}" "${ACTUAL_RSS_QUEUES}" "${INFO}"
 		echo ""
 	done
+
+	if [[ "${MLX_FOUND}" == 1 ]]; then
+	    if hash ibv_devinfo 2>/dev/null; then
+		# Nothing to do
+		echo -n ""
+	    else
+		echo "[!] You need to install the Mellanox driver in order to use ZC"
+		echo ""
+		install_mlx_driver
+	    fi
+	fi
 }
 
 count_by_driver() {

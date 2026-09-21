@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2016-22 ntop.org
+ *  Copyright (C) 2016-26 ntop
  *
  *      http://www.ntop.org/
  *
@@ -76,6 +76,7 @@ static char *proto_to_string(int protoq) {
   switch(protoq) {
     case NBPF_Q_LINK: return "Eth";
     case NBPF_Q_IP:   return "IP";
+    case NBPF_Q_ICMP: return "ICMP";
     case NBPF_Q_SCTP: return "SCTP";
     case NBPF_Q_TCP:  return "TCP";
     case NBPF_Q_UDP:  return "UDP";
@@ -350,17 +351,13 @@ void fiberblaze_dump_rules(nbpf_rule_list_item_t *pun) {
 
 /* *********************************************************** */
 
-#ifdef HAVE_NDPI 
+#ifdef HAVE_NDPI
 void init_ndpi_mod() {
-  NDPI_PROTOCOL_BITMASK all;
-
-  ndpi_mod = ndpi_init_detection_module(ndpi_no_prefs);
+  ndpi_mod = ndpi_init_detection_module(NULL);
 
   if (ndpi_mod == NULL)
     return;
 
-  NDPI_BITMASK_SET_ALL(all);
-  ndpi_set_protocol_detection_bitmask2(ndpi_mod, &all);
   ndpi_finalize_initialization(ndpi_mod);
 }
 

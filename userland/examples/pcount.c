@@ -1,5 +1,5 @@
 /*
- * (C) 2003-20 - ntop 
+ * (C) 2003-26 - ntop 
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -52,8 +52,6 @@ unsigned long long numPkts = 0, numBytes = 0;
 #define DEFAULT_DEVICE "eth1" /* "e1000" */
 
 int32_t gmt_to_local(time_t t);
-int pcap_set_cluster(pcap_t *ring, u_int clusterId);
-int pcap_set_application_name(pcap_t *handle, char *name);
 char* pfring_format_numbers(double val, char *buf, u_int buf_len, u_int8_t add_decimals);
 int use_pcap_loop = 1;
 
@@ -104,9 +102,9 @@ void print_stats() {
 
   if(pcap_stats(pd, &pcapStat) >= 0) {
     fprintf(stderr, "=========================\n"
-	    "Absolute Stats: [%u pkts rcvd][%u pkts dropped]\n"
+	    "Absolute Stats: [%u pkts rcvd][%u pkts dropped (%u if drops)]\n"
 	    "Total Pkts=%u/Dropped=%.1f %%\n",
-	    pcapStat.ps_recv, pcapStat.ps_drop, pcapStat.ps_recv-pcapStat.ps_drop,
+	    pcapStat.ps_recv, pcapStat.ps_drop, pcapStat.ps_ifdrop, pcapStat.ps_recv-pcapStat.ps_drop,
 	    pcapStat.ps_recv == 0 ? 0 : (double)(pcapStat.ps_drop*100)/(double)pcapStat.ps_recv);
     fprintf(stderr, "%llu pkts [%.1f pkt/sec] - %llu bytes [%.2f Mbit/sec]\n",
 	    numPkts, (double)numPkts/deltaSec,
@@ -334,7 +332,7 @@ void printHelp(void) {
   char errbuf[PCAP_ERRBUF_SIZE];
   pcap_if_t *devpointer;
 
-  printf("pcount\n(C) 2003-20 ntop.org\n");
+  printf("pcount\n(C) 2003-26 ntop\n");
   printf("-h              Print help\n");
   printf("-i <device>     Device name\n");
   printf("-f <filter>     pcap filter\n");
@@ -351,6 +349,8 @@ void printHelp(void) {
       printf(" %d. %s [%s]\n", i++, devpointer->name, devpointer->description);
       devpointer = devpointer->next;
     }
+
+    pcap_freealldevs(devpointer);
   }
 }
 
@@ -363,41 +363,6 @@ int main(int argc, char* argv[]) {
   struct bpf_program fcode;
   u_int8_t dont_strip_hw_ts = 0;
   int direction = PCAP_D_INOUT;
-
-#if 0
-  struct sched_param schedparam;
-
-  schedparam.sched_priority = 99;
-  if(sched_setscheduler(0, SCHED_FIFO, &schedparam) == -1) {
-    printf("error while setting the scheduler, errno=%i\n",errno);
-    exit(1);
-  }
-
-  mlockall(MCL_CURRENT|MCL_FUTURE);
-
-#define TEST_PROCESSOR_AFFINITY
-#ifdef TEST_PROCESSOR_AFFINITY
-  {
-   unsigned long new_mask = 1;
-   unsigned int len = sizeof(new_mask);
-   unsigned long cur_mask;
-   pid_t p = 0; /* current process */
-   int ret;
-
-   ret = sched_getaffinity(p, len, NULL);
-   printf(" sched_getaffinity = %d, len = %u\n", ret, len);
-
-   ret = sched_getaffinity(p, len, &cur_mask);
-   printf(" sched_getaffinity = %d, cur_mask = %08lx\n", ret, cur_mask);
-
-   ret = sched_setaffinity(p, len, &new_mask);
-   printf(" sched_setaffinity = %d, new_mask = %08lx\n", ret, new_mask);
-
-   ret = sched_getaffinity(p, len, &cur_mask);
-   printf(" sched_getaffinity = %d, cur_mask = %08lx\n", ret, cur_mask);
- }
-#endif
-#endif
 
   startTime.tv_sec = 0;
   thiszone = gmt_to_local(0);
@@ -464,6 +429,7 @@ int main(int argc, char* argv[]) {
       if(pcap_setfilter(pd, &fcode) < 0) {
 	printf("pcap_setfilter error: '%s'\n", pcap_geterr(pd));
       }
+      pcap_freecode(&fcode);
     }
   }
 

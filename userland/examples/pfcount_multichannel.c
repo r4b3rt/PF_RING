@@ -1,5 +1,5 @@
 /*
- * (C) 2003-20 - ntop 
+ * (C) 2003-26 - ntop 
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -181,12 +181,12 @@ void my_sigalarm(int sig) {
 /* *************************************** */
 
 void printHelp(void) {
-  printf("pfcount_multichannel\n(C) 2005-22 ntop.org\n\n");
+  printf("pfcount_multichannel\n(C) 2005-26 ntop\n\n");
   printf("-h              Print this help\n");
   printf("-i <device>     Device name (No device@channel)\n");
 
   printf("-e <direction>  0=RX+TX, 1=RX only, 2=TX only\n");
-  printf("-P <0|1>        Enable (1 - default) or disable (0) promisc\n");
+  printf("-J              Do not enable promiscuous mode\n");
   printf("-l <len>        Capture length\n");
   printf("-m              Print more metadata with -v (extended packet header)\n");
   printf("-w <watermark>  Watermark\n");
@@ -198,6 +198,7 @@ void printHelp(void) {
 	 "                binds thread <device>@0 on coreId 7, <device>@1 on coreId 6\n"
 	 "                and so on.\n");
   printf("-r              Rehash RSS packets\n");
+  printf("-x              IP-only RSS hashing for UDP/TCP traffic (Intel ixgbe and NVIDIA Mellanox only)\n");
   printf("-v              Verbose\n");
 }
 
@@ -239,7 +240,7 @@ void print_packet(const struct pfring_pkthdr *h, const u_char *p, long threadId)
     else buflen += snprintf(&bigbuf[buflen], BUFSIZE - buflen, "[eth_type=0x%04X]", eth_type);
 
     buflen += snprintf(&bigbuf[buflen], BUFSIZE - buflen, "[caplen=%d][len=%d]"
-      "[eth_offset=%d][l3_offset=%d][l4_offset=%d][payload_offset=%d]\n",
+      "[eth_offset=%d][l3_offset=%d][l4_offset=%d][payload_offset=%d]",
       h->caplen, h->len,
       h->extended_hdr.parsed_pkt.offset.eth_offset,
       h->extended_hdr.parsed_pkt.offset.l3_offset,
@@ -247,6 +248,7 @@ void print_packet(const struct pfring_pkthdr *h, const u_char *p, long threadId)
       h->extended_hdr.parsed_pkt.offset.payload_offset);
   }
   fputs(bigbuf, stdout);
+  fputs("\n", stdout);
 }
 
 /* ****************************************************** */
@@ -285,7 +287,7 @@ void* packet_consumer_thread(void* _id) {
          fprintf(stderr, "Error while binding thread %ld to core %ld: errno=%i\n", 
                  thread_id, core_id, s);
       else {
-         printf("Set thread %lu on core %lu/%u\n", thread_id, core_id, numCPU);
+         printf("Running capture thread %lu on core %lu/%u\n", thread_id, core_id, numCPU);
       }
    }
 #endif
@@ -334,7 +336,7 @@ void sample_filtering_rules() {
 
 int main(int argc, char* argv[]) {
   char *device = NULL, c, *bind_mask = NULL;
-  int snaplen = DEFAULT_SNAPLEN, rc, watermark = 0, rehash_rss = 0;
+  int snaplen = DEFAULT_SNAPLEN, rc, watermark = 0, rehash_rss = 0, ip_only_rss = 0;
   packet_direction direction = rx_only_direction;
   long i;
   u_int16_t cpu_percentage = 0, poll_duration = 0;
@@ -349,7 +351,7 @@ int main(int argc, char* argv[]) {
   thiszone = gmt_to_local(0);
   numCPU = sysconf( _SC_NPROCESSORS_ONLN );
 
-  while((c = getopt(argc,argv,"hi:I:l:mvae:w:b:rp:P:g:")) != -1) {
+  while((c = getopt(argc,argv,"hi:I:Jl:mvae:w:b:rp:g:x")) != -1) {
     switch(c) {
     case 'h':
       printHelp();
@@ -377,11 +379,15 @@ int main(int argc, char* argv[]) {
       src_ip_rule = ntohl(inet_addr(optarg));
       src_ip_rule_set = 1;
       break;
+    case 'J':
+      promisc = 0;
+      break;
     case 'm':
       use_extended_pkt_header = 1;
       break;
     case 'v':
       verbose = 1;
+      use_extended_pkt_header = 1;
       break;
     case 'w':
       watermark = atoi(optarg);
@@ -392,11 +398,11 @@ int main(int argc, char* argv[]) {
     case 'r':
       rehash_rss = 1;
       break;
+    case 'x':
+      ip_only_rss = 1;
+      break;
     case 'p':
       poll_duration = atoi(optarg);
-      break;
-    case 'P':
-      promisc = atoi(optarg);
       break;
     case 'g':
       bind_mask = strdup(optarg);
@@ -423,12 +429,13 @@ int main(int argc, char* argv[]) {
   if ((threads = calloc(MAX_NUM_THREADS, sizeof(struct thread_stats))) == NULL)
     return -1;
 
-  printf("Capturing from %s\n", device);
+  printf("Setting up sockets on %s...\n", device);
 
   if (promisc)
     flags |= PF_RING_PROMISC;
   flags |= PF_RING_ZC_SYMMETRIC_RSS;  /* Note that symmetric RSS is ignored by non-ZC drivers */
   if(use_extended_pkt_header) flags |= PF_RING_LONG_HEADER;
+  if(ip_only_rss) flags |= PF_RING_ZC_IPONLY_RSS;
 
   num_channels = pfring_open_multichannel(device, snaplen, flags, ring);
   

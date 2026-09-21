@@ -1,5 +1,5 @@
 /*
- * (C) 2018-22 - ntop.org
+ * (C) 2018-26 - ntop
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -50,6 +50,7 @@
 #ifdef HAVE_NDPI
 #define PRINT_NDPI_INFO /* Note: this requires linking the nDPI library */
 #include "ndpi_api.h"
+//#define CUSTOM_NDPI
 #endif
 
 pcap_t *pd = NULL;
@@ -197,9 +198,11 @@ void processFlow(pfring_ft_flow *flow, void *user){
     ndpi_protocol ndpi_proto;
     ndpi_serializer serializer;
     u_int buffer_len;
+  
+    ndpi_init_serializer(&serializer, ndpi_serialization_format_json);
  
-    ndpi_proto.master_protocol = v->l7_protocol.master_protocol;
-    ndpi_proto.app_protocol = v->l7_protocol.app_protocol;
+    ndpi_proto.proto.master_protocol = v->l7_protocol.master_protocol;
+    ndpi_proto.proto.app_protocol = v->l7_protocol.app_protocol;
     ndpi_proto.category = v->l7_protocol.category;
  
     ndpi_flow2json(ndpi_struct, ndpi_flow,
@@ -234,17 +237,18 @@ void process_packet(u_char *_deviceId, const struct pcap_pkthdr *h, const u_char
     char buffer[256];
     buffer[0] = '\0';
     pfring_print_pkt(buffer, sizeof(buffer), p, h->len, h->caplen);
-    printf("[Packet]%s %s", action == PFRING_FT_ACTION_DISCARD ? " [discard]" : "", buffer);
+    printf("[Packet]%s %s\n", action == PFRING_FT_ACTION_DISCARD ? " [discard]" : "", buffer);
   }
 }
 
 /* *************************************** */
 
 void print_help(void) {
-  printf("ftflow_pcap - (C) 2018-22 ntop.org\n");
+  printf("ftflow_pcap - (C) 2018-26 ntop\n");
   printf("-h              Print help\n");
   printf("-i <device>     Device name or PCAP file\n");
   printf("-7              Enable L7 protocol detection (nDPI)\n");
+  printf("-N              Disable L7 protocol guess (nDPI)\n");
   printf("-F <file>       Load filtering/shunting rules from file\n");
   printf("-p <file>       Load nDPI custom protocols from file\n");
   printf("-c <file>       Load nDPI categories by host from file\n");
@@ -269,11 +273,16 @@ int main(int argc, char* argv[]) {
   struct bpf_program fcode;
   u_int32_t ft_flags = 0;
   char *categories_file = NULL;
+  int no_guess = 0;
   int rc; 
- 
+#ifdef CUSTOM_NDPI
+  struct ndpi_detection_module_struct *ndpi_mod;
+  NDPI_PROTOCOL_BITMASK all;
+#endif
+
   startTime.tv_sec = 0;
 
-  while ((c = getopt(argc,argv,"c:dhi:vf:p:q7F:")) != '?') {
+  while ((c = getopt(argc,argv,"c:dhi:vf:p:q7F:N")) != '?') {
     if ((c == 255) || (c == -1)) break;
 
     switch(c) {
@@ -306,6 +315,9 @@ int main(int argc, char* argv[]) {
     case '7':
       enable_l7 = 1;
       break;
+    case 'N':
+      no_guess = 1;
+      break;
     case 'F':
       enable_l7 = 1;
       configuration_file = strdup(optarg);
@@ -319,11 +331,15 @@ int main(int argc, char* argv[]) {
   }
 
   if (enable_l7) {
+#ifndef CUSTOM_NDPI
     ft_flags |= PFRING_FT_TABLE_FLAGS_DPI;
-    ft_flags |= PFRING_FT_DECODE_TUNNELS;
 #ifdef PRINT_NDPI_INFO
     ft_flags |= PFRING_FT_TABLE_FLAGS_DPI_EXTRA;
 #endif
+    if (no_guess)
+      ft_flags |= PFRING_FT_TABLE_FLAGS_NO_GUESS;
+#endif
+    ft_flags |= PFRING_FT_DECODE_TUNNELS;
   }
 
   ft = pfring_ft_create_table(ft_flags, 0, 0, 0, 0);
@@ -332,6 +348,18 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "pfring_ft_create_table error\n");
     return -1;
   }
+
+#ifdef CUSTOM_NDPI
+  if (enable_l7) {
+    ndpi_mod = ndpi_init_detection_module(NULL);
+    ndpi_set_config(ndpi_mod, NULL, "dpi.guess_on_giveup", "0");
+    NDPI_BITMASK_SET_ALL(all);
+    ndpi_set_protocol_detection_bitmask2(ndpi_mod, &all);
+    ndpi_finalize_initialization(ndpi_mod);
+
+    pfring_ft_set_ndpi_handle(ft, ndpi_mod);
+  }
+#endif
 
   pfring_ft_set_flow_export_callback(ft, processFlow, NULL);
 
@@ -386,6 +414,7 @@ int main(int argc, char* argv[]) {
       if (pcap_setfilter(pd, &fcode) < 0) {
 	printf("pcap_setfilter error: '%s'\n", pcap_geterr(pd));
       }
+      pcap_freecode(&fcode);
     }
   }
   

@@ -6267,6 +6267,7 @@ static inline void __page_frag_cache_drain(struct page *page,
  */
 #define HAVE_NAPI_STATE_IN_BUSY_POLL
 #define HAVE_TCF_MIRRED_EGRESS_REDIRECT
+#define HAVE_PTP_CLOCK_INFO_ADJFINE
 #endif /* 4.10.0 */
 
 /*****************************************************************************/
@@ -7433,5 +7434,99 @@ static inline void net_prefetch(void *p)
 #define HAVE_XDP_DO_FLUSH
 #define HAVE_ETHTOOL_EXTENDED_RINGPARAMS
 #endif /* 5.17.0 */
+
+/*****************************************************************************/
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,0,0))
+
+#else
+
+#define HAVE_NETIF_SET_TSO_MAX
+
+#endif
+
+/*****************************************************************************/
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0)) ||\
+   (RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8,8)))
+
+static inline void
+_kc_netif_napi_add(struct net_device *dev, struct napi_struct *napi,
+                   int (*poll)(struct napi_struct *, int), int weight)
+{       
+        return netif_napi_add(dev, napi, poll);
+}
+#ifdef netif_napi_add
+#undef netif_napi_add
+#endif
+#define netif_napi_add _kc_netif_napi_add
+
+#endif
+
+/*****************************************************************************/
+/* HAVE_PF_RING */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0))
+
+#define HAVE_HW_TIME_STAMP
+#define strlcpy(...) (void)(strscpy(__VA_ARGS__))
+static inline int pci_enable_pcie_error_reporting(struct pci_dev __always_unused *dev)
+{
+	return 0;
+}
+#define pci_disable_pcie_error_reporting(dev) do {} while (0)
+
+#endif
+
+/*****************************************************************************/
+#if RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE > 0) 
+
+#if (RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(8,6))
+
+#elif (RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9,0))
+#define HAVE_ETHTOOL_COALESCE_EXTACK
+#define HAVE_ETHTOOL_EXTENDED_RINGPARAMS
+
+#else /* >= 9.1 */
+#define HAVE_ETHTOOL_COALESCE_EXTACK
+#define HAVE_ETHTOOL_EXTENDED_RINGPARAMS
+
+#if (RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9,4)) /* >= 9.1 && < 9.4*/
+
+#else /* >= 9.4 */
+static inline int pci_enable_pcie_error_reporting(struct pci_dev __always_unused *dev)
+{
+        return 0;
+}
+#define pci_disable_pcie_error_reporting(dev) do {} while (0)
+
+#if (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,5))
+#define HAVE_ETHTOOL_KEEE
+#endif
+
+/* HAVE_PF_RING */
+#if (RHEL_RELEASE_CODE && (RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,6)))
+#define HAVE_ETHTOOL_GET_TS_KERNEL
+#undef CONFIG_PTP_1588_CLOCK /* Due to missing convert_art_to_tsc */
+#endif
+
+#endif
+
+#endif
+
+#endif /* RHEL */
+
+/*****************************************************************************/
+/* HAVE_PF_RING */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7,0,0))
+#define del_timer(t)		timer_delete(t)
+#define del_timer_sync(t)	timer_delete_sync(t)
+#define from_timer(var, callback_timer, timer_fieldname) \
+	timer_container_of(var, callback_timer, timer_fieldname)
+#ifndef HAVE_ETHTOOL_KEEE
+#define HAVE_ETHTOOL_KEEE
+#endif
+#ifndef HAVE_ETHTOOL_GET_TS_KERNEL
+#define HAVE_ETHTOOL_GET_TS_KERNEL
+#endif
+#undef CONFIG_PTP_1588_CLOCK /* convert_art_to_tsc removed in kernel 7.0 */
+#endif /* >= 7.0.0 */
 
 #endif /* _KCOMPAT_H_ */

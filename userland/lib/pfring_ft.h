@@ -1,6 +1,6 @@
 /*
  *
- * (C) 2018-2021 - ntop.org
+ * (C) 2018-2023 - ntop
  *
  *  http://www.ntop.org/
  *
@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define FT_API_VERSION 47
+#define FT_API_VERSION 107
 
 typedef void pfring_ft_table;
 typedef void pfring_ft_list;
@@ -37,9 +37,10 @@ struct ndpi_flow_struct;
 
 #define PFRING_FT_ACTION_DEFAULT 0
 #define PFRING_FT_ACTION_FORWARD 1
-#define PFRING_FT_ACTION_DISCARD 2
+#define PFRING_FT_ACTION_DISCARD 2 /**< Discard packet due to filter or shunt */
 #define PFRING_FT_ACTION_USER_1  3
 #define PFRING_FT_ACTION_USER_2  4
+#define PFRING_FT_ACTION_SLICE   5 /**< Slice packet headers */
 
 typedef u_int8_t pfring_ft_action;
 
@@ -59,14 +60,16 @@ typedef enum {
   PFRING_FT_FLOW_STATUS_OVERFLOW        /**< Exported from those with higher inactivity to make room */
 } pfring_ft_flow_status;
 
-#define PF_RING_FT_FLOW_FLAGS_L7_GUESS (1 <<  0) /**< pfring_ft_flow_value.flags: detected L7 protocol is a guess. */
+#define PF_RING_FT_FLOW_FLAGS_L7_GUESS    (1 <<  0) /**< pfring_ft_flow_value.flags: detected L7 protocol is a guess. */
 
 typedef struct {
-  u_int32_t num_protocols; /**< Number of supported L7 protocols */
+  u_int32_t num_protocols;  /**< Number of supported L7 protocols */
+  u_int32_t num_categories; /**< Number of supported nDPI categories */
 
   /* Filtering */
   struct {
     pfring_ft_action *protocol_to_action; /**< Action per L7 protocol */
+    pfring_ft_action *category_to_action; /**< Action per nDPI category */
   } match;
 
   /* Shunting */
@@ -75,6 +78,7 @@ typedef struct {
     u_int8_t tcp_npkts;          /**< Number of packets to forward in case of TCP */
     u_int8_t udp_npkts;          /**< Number of packets to forward in case of UDP */
     u_int8_t *protocol_to_npkts; /**< Number of packets to forward per L7 protocol */
+    u_int8_t *category_to_npkts; /**< Number of packets to forward per nDPI category */
   } shunt;
 } pfring_ft_flow_filter;
 
@@ -154,6 +158,7 @@ typedef struct {
   pfring_ft_pcap_pkthdr *hdr;
   pfring_ft_ext_pkthdr *ext_hdr;
   pfring_ft_direction direction;
+  pfring_ft_action action;
   u_int16_t vlan_id;
   u_int8_t ip_version;
   u_int8_t l4_proto;
@@ -258,6 +263,12 @@ typedef struct {
   u_int64_t bytes;            /**< Total number of packet bytes */
 } pfring_ft_stats;
 
+typedef struct {
+  u_int32_t num_buffered_records;
+  u_int32_t exported_flows;
+  u_int32_t dropped_flows;
+} pfring_ft_export_stats;
+
 /*** Callbacks prototypes ***/
 
 typedef void
@@ -284,6 +295,9 @@ typedef void
 #define PFRING_FT_TABLE_FLAGS_DPI_EXTRA (1 << 1) /**< pfring_ft_create_table() flag: enable nDPI extra dissection (more flow metadata) */
 #define PFRING_FT_DECODE_TUNNELS        (1 << 2) /**< pfring_ft_create_table() flag: decode tunnels (GTP, L2TP, CAPWAP) */
 #define PFRING_FT_IGNORE_HW_HASH        (1 << 3) /**< pfring_ft_create_table() flag: ignore hw packet hash (e.g. when it's asymmetric leading to one flow per direction) */
+#define PFRING_FT_IGNORE_VLAN           (1 << 4) /**< pfring_ft_create_table() flag: do not include vlan in flow key */
+#define PFRING_FT_TABLE_FLAGS_NO_GUESS  (1 << 5) /**< pfring_ft_create_table() flag: do not guess the protocol when not detected with DPI */
+#define PFRING_FT_KEY_EXT_MAC           (1 << 6) /**< pfring_ft_create_table() flag: include source and destination MAC address in the flow key */
 
 /**
  * Create a new flow table.
@@ -575,6 +589,17 @@ pfring_ft_zmq_export_stats(
 );
 
 /**
+ * Get ZMQ export stats
+ * @param table The flow table handle.
+ * @param stats The ZMQ stats (out).
+ */
+void
+pfring_ft_zmq_get_stats(
+  pfring_ft_table *table,
+  pfring_ft_export_stats *stats
+);
+
+/**
  * Set the default action for detected L7 protocols with no filtering rule.
  * This can be used to 'drop all' traffic, exception made for specific protocols
  * setting the default to PFRING_FT_ACTION_DISCARD and filter actions to PFRING_FT_ACTION_FORWARD
@@ -648,11 +673,77 @@ pfring_ft_set_filter_all_protocols(
  * @param protocol_name The nDPI protocol name.
  * @param action The action returned by pfring_ft_process() for all packets matching the protocol.
  */
-void 
+void
 pfring_ft_set_filter_protocol_by_name(
   pfring_ft_table *table,
   const char *protocol_name,
   pfring_ft_action action
+);
+
+/**
+ * Set a shunt rule for a nDPI category.
+ * @param table The flow table handle.
+ * @param category_name The nDPI category name.
+ * @param packets The number of packets before shunting the flow returning a discard action from pfring_ft_process().
+ */
+void
+pfring_ft_set_shunt_category_by_name(
+  pfring_ft_table *table,
+  const char *category_name,
+  u_int8_t packets
+);
+
+/**
+ * Set a default action for all nDPI categories. This is usually used to reset all filtering rules
+ * by passing PFRING_FT_ACTION_DEFAULT as action.
+ * @param table The flow table handle.
+ * @param action The action to set for all categories.
+ */
+void
+pfring_ft_set_filter_all_categories(
+  pfring_ft_table *table,
+  pfring_ft_action action
+);
+
+/**
+ * Set a filtering rule for a nDPI category.
+ * @param table The flow table handle.
+ * @param category_name The nDPI category name.
+ * @param action The action returned by pfring_ft_process() for all packets matching the category.
+ */
+void
+pfring_ft_set_filter_category_by_name(
+  pfring_ft_table *table,
+  const char *category_name,
+  pfring_ft_action action
+);
+
+/**
+ * Return the nDPI category name providing the nDPI category ID.
+ * @param table The flow table handle.
+ * @param category The nDPI category ID.
+ * @param buffer The output buffer.
+ * @param buffer_len The output buffer length.
+ * @return The buffer.
+ */
+char *
+pfring_ft_category_name(
+  pfring_ft_table *table,
+  int category,
+  char *buffer,
+  int buffer_len
+);
+
+/**
+ * Return the nDPI category ID providing the category name.
+ * @param table The flow table handle.
+ * @param name The nDPI category name.
+ * @return The nDPI category ID, or -1 if not found.
+ */
+int
+pfring_ft_category_id(
+  pfring_ft_table *table,
+  const char *name
 );
 
 /**

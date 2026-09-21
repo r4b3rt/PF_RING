@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2014-22 ntop.org
+ *  Copyright (C) 2014-26 ntop
  *
  *      http://www.ntop.org/
  *
